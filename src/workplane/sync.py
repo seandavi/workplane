@@ -11,10 +11,6 @@ import datetime as dt
 import logging
 from dataclasses import dataclass, field
 
-from psycopg import AsyncConnection
-from psycopg.types.json import Jsonb
-from psycopg_pool import AsyncConnectionPool
-
 from . import db
 from .config import Config
 from .domain import Status
@@ -60,24 +56,24 @@ def initial_status(cfg: Config, item: GhItem, now: dt.datetime) -> Status:
     return Status.BACKLOG
 
 
-async def _upsert_repo(conn: AsyncConnection, cfg: Config, full_name: str, private: bool) -> int:
+async def _upsert_repo(conn: db.Connection, cfg: Config, full_name: str, private: bool) -> int:
     cur = await conn.execute(
         "INSERT INTO repositories (full_name, is_private, area, synced_at)"
-        " VALUES (%s, %s, %s, now())"
+        f" VALUES (?, ?, ?, {db.NOW})"
         " ON CONFLICT (full_name) DO UPDATE SET is_private = EXCLUDED.is_private,"
-        " area = EXCLUDED.area, synced_at = now() RETURNING id",
+        f" area = EXCLUDED.area, synced_at = {db.NOW} RETURNING id",
         (full_name, private, cfg.area_for(full_name)),
     )
     return (await cur.fetchone())["id"]
 
 
-async def ingest_item(conn: AsyncConnection, cfg: Config, item: GhItem, now: dt.datetime) -> str:
+async def ingest_item(conn: db.Connection, cfg: Config, item: GhItem, now: dt.datetime) -> str:
     """Upsert one GitHub item. Returns ``"new"``, ``"transition"`` or ``"unchanged"``."""
     async with conn.transaction():
         repo_id = await _upsert_repo(conn, cfg, item.repo, item.repo_private)
         cur = await conn.execute(
             "SELECT g.id, g.state, w.id AS work_id FROM github_items g"
-            " JOIN work_items w ON w.github_item_id = g.id WHERE g.node_id = %s FOR UPDATE OF g",
+            " JOIN work_items w ON w.github_item_id = g.id WHERE g.node_id = ?",
             (item.node_id,),
         )
         prev = await cur.fetchone()
@@ -86,10 +82,10 @@ async def ingest_item(conn: AsyncConnection, cfg: Config, item: GhItem, now: dt.
             INSERT INTO github_items (node_id, repository_id, number, kind, title, state,
                 state_reason, author, labels, assignees, review_requests, comments_count,
                 is_draft, is_noise, url, created_at, updated_at, closed_at)
-            VALUES (%(node_id)s, %(repo_id)s, %(number)s, %(kind)s, %(title)s, %(state)s,
-                %(state_reason)s, %(author)s, %(labels)s, %(assignees)s, %(review_requests)s,
-                %(comments_count)s, %(is_draft)s, %(is_noise)s, %(url)s, %(created_at)s,
-                %(updated_at)s, %(closed_at)s)
+            VALUES (:node_id, :repo_id, :number, :kind, :title, :state,
+                :state_reason, :author, :labels, :assignees, :review_requests,
+                :comments_count, :is_draft, :is_noise, :url, :created_at,
+                :updated_at, :closed_at)
             ON CONFLICT (node_id) DO UPDATE SET
                 repository_id = EXCLUDED.repository_id, number = EXCLUDED.number,
                 title = EXCLUDED.title, state = EXCLUDED.state,
@@ -110,9 +106,9 @@ async def ingest_item(conn: AsyncConnection, cfg: Config, item: GhItem, now: dt.
                 "state": item.state,
                 "state_reason": item.state_reason,
                 "author": item.author,
-                "labels": Jsonb(item.labels),
-                "assignees": Jsonb(item.assignees),
-                "review_requests": Jsonb(item.review_requests),
+                "labels": item.labels,
+                "assignees": item.assignees,
+                "review_requests": item.review_requests,
                 "comments_count": item.comments_count,
                 "is_draft": item.is_draft,
                 "is_noise": cfg.is_noise(item.title, item.author),
@@ -128,23 +124,23 @@ async def ingest_item(conn: AsyncConnection, cfg: Config, item: GhItem, now: dt.
             status = initial_status(cfg, item, now)
             cur = await conn.execute(
                 "INSERT INTO work_items (source, github_item_id, title, status)"
-                " VALUES ('github', %s, %s, %s) RETURNING id",
+                " VALUES ('github', ?, ?, ?) RETURNING id",
                 (gh_id, item.title, status.value),
             )
             work_id = (await cur.fetchone())["id"]
             await conn.execute(
                 "INSERT INTO work_events (work_item_id, actor, event_type, to_status, payload)"
-                " VALUES (%s, 'github', 'imported', %s, %s)",
+                " VALUES (?, 'github', 'imported', ?, ?)",
                 (
                     work_id,
                     status.value,
-                    Jsonb({"state": item.state, "author": item.author, "url": item.url}),
+                    {"state": item.state, "author": item.author, "url": item.url},
                 ),
             )
             return "new"
 
         await conn.execute(
-            "UPDATE work_items SET title = %s WHERE id = %s AND title <> %s",
+            "UPDATE work_items SET title = ? WHERE id = ? AND title <> ?",
             (item.title, prev["work_id"], item.title),
         )
         if prev["state"] == item.state:
@@ -166,7 +162,7 @@ async def ingest_item(conn: AsyncConnection, cfg: Config, item: GhItem, now: dt.
 
 
 async def _ingest_all(
-    conn: AsyncConnection, cfg: Config, items: list[GhItem], report: SyncReport, now: dt.datetime
+    conn: db.Connection, cfg: Config, items: list[GhItem], report: SyncReport, now: dt.datetime
 ) -> None:
     for item in items:
         if (item.repo_fork and not cfg.include_forks) or item.repo_archived:
@@ -188,7 +184,7 @@ async def _tracked_repos(gh: GitHub, cfg: Config) -> list:
     return list(unique.values())
 
 
-async def full_sync(conn: AsyncConnection, cfg: Config, gh: GitHub) -> SyncReport:
+async def full_sync(conn: db.Connection, cfg: Config, gh: GitHub) -> SyncReport:
     """Fetch every open issue/PR in tracked repos, then re-check ones that vanished."""
     report = SyncReport(mode="full")
     now = dt.datetime.now(dt.UTC)
@@ -218,7 +214,7 @@ async def full_sync(conn: AsyncConnection, cfg: Config, gh: GitHub) -> SyncRepor
 
 
 async def incremental_sync(
-    conn: AsyncConnection, cfg: Config, gh: GitHub, since: dt.datetime
+    conn: db.Connection, cfg: Config, gh: GitHub, since: dt.datetime
 ) -> SyncReport:
     """Ingest everything updated since ``since`` via issue search."""
     report = SyncReport(mode="incremental")
@@ -235,37 +231,30 @@ async def incremental_sync(
     return report
 
 
-async def run_sync(pool: AsyncConnectionPool, cfg: Config, *, full: bool = False) -> SyncReport:
-    """Run one sync; at most one runs at a time across all processes."""
+async def run_sync(database: db.Database, cfg: Config, *, full: bool = False) -> SyncReport:
+    """Run one sync. A request made while another sync is running is skipped."""
     if not cfg.github_token:
         raise RuntimeError("GITHUB_TOKEN is not set")
-    async with pool.connection() as lock_conn:
-        cur = await lock_conn.execute("SELECT pg_try_advisory_lock(%s) AS ok", (db.SYNC_LOCK,))
-        if not (await cur.fetchone())["ok"]:
-            return SyncReport(mode="skipped", errors=["another sync is running"])
+    if database.sync_lock.locked():
+        return SyncReport(mode="skipped", errors=["another sync is running"])
+    async with database.sync_lock:
+        started = dt.datetime.now(dt.UTC)
+        gh = GitHub(cfg.github_token)
         try:
-            started = dt.datetime.now(dt.UTC)
-            gh = GitHub(cfg.github_token)
-            try:
-                async with pool.connection() as conn:
-                    cur = await conn.execute(
-                        "SELECT value FROM sync_state WHERE key = 'last_sync'"
-                    )
-                    row = await cur.fetchone()
-                    if full or row is None:
-                        report = await full_sync(conn, cfg, gh)
-                    else:
-                        since = dt.datetime.fromisoformat(row["value"])
-                        report = await incremental_sync(conn, cfg, gh, since)
-                    await conn.execute(
-                        "INSERT INTO sync_state (key, value) VALUES ('last_sync', %s)"
-                        " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,"
-                        " updated_at = now()",
-                        (started.isoformat(),),
-                    )
-            finally:
-                await gh.aclose()
-            log.info("sync %s", report.as_dict())
-            return report
+            async with database.connection() as conn:
+                cur = await conn.execute("SELECT value FROM sync_state WHERE key = 'last_sync'")
+                row = await cur.fetchone()
+                if full or row is None:
+                    report = await full_sync(conn, cfg, gh)
+                else:
+                    since = dt.datetime.fromisoformat(row["value"])
+                    report = await incremental_sync(conn, cfg, gh, since)
+                await conn.execute(
+                    "INSERT INTO sync_state (key, value) VALUES ('last_sync', ?)"
+                    f" ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = {db.NOW}",
+                    (started.isoformat(),),
+                )
         finally:
-            await lock_conn.execute("SELECT pg_advisory_unlock(%s)", (db.SYNC_LOCK,))
+            await gh.aclose()
+        log.info("sync %s", report.as_dict())
+        return report

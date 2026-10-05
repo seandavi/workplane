@@ -17,8 +17,6 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
-from psycopg import AsyncConnection
-from psycopg_pool import AsyncConnectionPool
 
 from . import db, runs, work
 from .config import Config, load
@@ -89,10 +87,10 @@ class RunFinishIn(BaseModel):
     error: str | None = None
 
 
-async def _sync_loop(pool: AsyncConnectionPool, cfg: Config) -> None:
+async def _sync_loop(database: db.Database, cfg: Config) -> None:
     while True:
         try:
-            await run_sync(pool, cfg)
+            await run_sync(database, cfg)
         except Exception:
             log.exception("background sync failed")
         await asyncio.sleep(cfg.sync_interval_seconds)
@@ -103,15 +101,13 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        applied = await db.migrate(cfg.database_url)
+        applied = await db.migrate(cfg.database_path)
         if applied:
             log.info("applied migrations: %s", ", ".join(applied))
-        pool = db.open_pool(cfg.database_url)
-        await pool.open()
-        app.state.pool = pool
+        app.state.db = db.Database(cfg.database_path)
         task = None
         if cfg.github_token and cfg.sync_interval_seconds > 0:
-            task = asyncio.create_task(_sync_loop(pool, cfg))
+            task = asyncio.create_task(_sync_loop(app.state.db, cfg))
         else:
             log.warning("background sync off (GITHUB_TOKEN unset or interval 0)")
         try:
@@ -121,7 +117,6 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
-            await pool.close()
 
     app = FastAPI(title="workplane", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=str(_PKG / "static")), name="static")
@@ -134,20 +129,20 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
         app.add_exception_handler(exc_type, handler)
 
-    def pool(request: Request) -> AsyncConnectionPool:
-        return request.app.state.pool
+    def database(request: Request) -> db.Database:
+        return request.app.state.db
 
     # --- JSON API ---------------------------------------------------------
 
     @app.get("/api/healthz")
     async def healthz(request: Request) -> dict:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             await conn.execute("SELECT 1")
         return {"ok": True}
 
     @app.get("/api/summary")
     async def api_summary(request: Request) -> dict:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return await work.summary(conn, cfg)
 
     @app.get("/api/commands")
@@ -168,26 +163,26 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         limit: int = Query(200, le=2000),
     ) -> list[dict]:
         statuses = _parse_statuses(status)
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return await work.list_items(
                 conn, statuses=statuses, area=area, repo=repo, query=q, include_noise=noise, limit=limit
             )
 
     @app.get("/api/resolve")
     async def api_resolve(request: Request, ref: str) -> dict:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return {"id": await work.resolve_ref(conn, cfg, ref)}
 
     @app.get("/api/work/{work_id}")
     async def api_get(request: Request, work_id: int) -> dict:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             item = await work.get_item(conn, work_id)
             events = await work.get_events(conn, work_id)
         return {**item, "events": events, "commands": available_commands(Status(item["status"]))}
 
     @app.post("/api/work", status_code=201)
     async def api_create(request: Request, body: ManualIn) -> dict:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return await work.create_manual(
                 conn,
                 cfg,
@@ -202,7 +197,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.post("/api/work/{work_id}/events", status_code=201)
     async def api_event(request: Request, work_id: int, body: EventIn) -> dict:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             event = await work.apply_event(
                 conn, cfg, work_id, body.type, actor=body.actor or cfg.default_actor, payload=body.payload
             )
@@ -211,17 +206,17 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.get("/api/views/needs-me")
     async def api_needs_me(request: Request) -> list[dict]:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return await work.needs_me(conn, cfg)
 
     @app.get("/api/views/done")
     async def api_done(request: Request, days: int = 7) -> list[dict]:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return await work.recently_done(conn, days=days)
 
     @app.post("/api/sync")
     async def api_sync(request: Request, full: bool = False) -> dict:
-        return (await run_sync(pool(request), cfg, full=full)).as_dict()
+        return (await run_sync(database(request), cfg, full=full)).as_dict()
 
     # --- runs -------------------------------------------------------------
 
@@ -231,7 +226,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.post("/api/runs", status_code=201)
     async def api_run_create(request: Request, body: RunIn) -> dict:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return await runs.create_run(conn, cfg, **body.model_dump())
 
     @app.get("/api/runs")
@@ -242,36 +237,36 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         since_hours: int | None = None,
         limit: int = Query(50, le=500),
     ) -> list[dict]:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return await runs.list_runs(
                 conn, active=active, work_item_id=work_item_id, since_hours=since_hours, limit=limit
             )
 
     @app.get("/api/runs/{run_id}")
     async def api_run(request: Request, run_id: int) -> dict:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return await runs.get_run(conn, run_id)
 
     @app.get("/api/runs/{run_id}/events")
     async def api_run_events(request: Request, run_id: int, after: int = 0) -> list[dict]:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return await runs.run_events(conn, run_id, after_id=after)
 
     @app.post("/api/runs/{run_id}/events")
     async def api_run_record(request: Request, run_id: int, body: RunEventsIn) -> dict:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return await runs.record_events(
                 conn, run_id, body.events, pid=body.pid, harness_session_id=body.harness_session_id
             )
 
     @app.post("/api/runs/{run_id}/finish")
     async def api_run_finish(request: Request, run_id: int, body: RunFinishIn) -> dict:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return await runs.finish_run(conn, cfg, run_id, **body.model_dump())
 
     @app.post("/api/runs/{run_id}/stop")
     async def api_run_stop(request: Request, run_id: int) -> dict:
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             return await runs.request_stop(conn, cfg, run_id)
 
     @app.get("/api/stream")
@@ -279,19 +274,21 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         """Server-sent events: one message per run change (created, events, finished)."""
 
         async def events() -> AsyncIterator[str]:
-            async with await AsyncConnection.connect(cfg.database_url, autocommit=True) as conn:
-                await conn.execute(f"LISTEN {runs.NOTIFY_CHANNEL}")
+            async with database(request).hub.subscribe() as queue:
                 yield ": connected\n\n"
                 while not await request.is_disconnected():
-                    async for note in conn.notifies(timeout=15.0):
-                        yield f"data: {note.payload}\n\n"
-                    yield ": keepalive\n\n"
+                    try:
+                        message = await asyncio.wait_for(queue.get(), timeout=15.0)
+                    except TimeoutError:
+                        yield ": keepalive\n\n"
+                    else:
+                        yield f"data: {message}\n\n"
 
         return StreamingResponse(
             events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
         )
 
-    async def _agents_ctx(conn: AsyncConnection) -> dict[str, Any]:
+    async def _agents_ctx(conn: db.Connection) -> dict[str, Any]:
         return {
             "active_runs": await runs.list_runs(conn, active=True),
             "recent_runs": [
@@ -303,30 +300,30 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.get("/fragments/agents")
     async def fragment_agents(request: Request):
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             ctx = await _agents_ctx(conn)
         return render(request, "_agents.html", **ctx)
 
-    async def _run_ctx(conn: AsyncConnection, run_id: int) -> dict[str, Any]:
+    async def _run_ctx(conn: db.Connection, run_id: int) -> dict[str, Any]:
         run = await runs.get_run(conn, run_id)
         events = await runs.run_events(conn, run_id)
         return {"run": run, "events": [e for e in events if e["kind"] in ("tool_start", "tool_end", "turn_end", "agent_end")]}
 
     @app.get("/runs/{run_id}")
     async def run_page(request: Request, run_id: int):
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             ctx = await _run_ctx(conn, run_id)
         return render(request, "run.html", **ctx)
 
     @app.get("/fragments/run/{run_id}")
     async def fragment_run(request: Request, run_id: int):
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             ctx = await _run_ctx(conn, run_id)
         return render(request, "_run.html", **ctx)
 
     @app.post("/runs/{run_id}/stop")
     async def run_stop(request: Request, run_id: int, back: str = Form("")):
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             await runs.request_stop(conn, cfg, run_id)
         return _redirect(back or f"/runs/{run_id}", msg=f"stop requested for run {run_id}")
 
@@ -343,7 +340,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.get("/")
     async def cockpit(request: Request):
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             summary = await work.summary(conn, cfg)
             needs = await work.needs_me(conn, cfg)
             inbox = await work.list_items(conn, statuses=[Status.INBOX.value], limit=50)
@@ -377,7 +374,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         noise: bool = False,
     ):
         statuses = _parse_statuses(status) or [s.value for s in Status if s not in TERMINAL]
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             rows = await work.list_items(
                 conn, statuses=statuses, area=area, repo=repo, query=q, include_noise=noise, limit=500
             )
@@ -395,7 +392,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.get("/items/{work_id}")
     async def item_page(request: Request, work_id: int):
-        async with pool(request).connection() as conn:
+        async with database(request).connection() as conn:
             item = await work.get_item(conn, work_id)
             events = await work.get_events(conn, work_id)
             item_runs = await runs.list_runs(conn, work_item_id=work_id, limit=20)
@@ -438,7 +435,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             payload["reason"] = reason
         target = back or f"/items/{work_id}"
         try:
-            async with pool(request).connection() as conn:
+            async with database(request).connection() as conn:
                 await work.apply_event(conn, cfg, work_id, type, actor=cfg.default_actor, payload=payload)
         except tuple(_ERRORS) as exc:
             return _redirect(target, error=str(exc), retry=f"{work_id}:{type}")
@@ -453,7 +450,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         commit: bool = Form(False),
     ):
         try:
-            async with pool(request).connection() as conn:
+            async with database(request).connection() as conn:
                 item = await work.create_manual(
                     conn,
                     cfg,
@@ -470,7 +467,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @app.post("/sync")
     async def sync_now(request: Request, full: bool = Form(False)):
         try:
-            report = await run_sync(pool(request), cfg, full=full)
+            report = await run_sync(database(request), cfg, full=full)
         except Exception as exc:  # surface any sync failure on the page
             return _redirect("/", error=f"sync failed: {exc}")
         return _redirect(

@@ -17,9 +17,9 @@ class RunnerConfig:
     """Where and how the host-side runner starts agents. Paths may use ``~``."""
 
     #: Directories holding existing clones, searched by repo name.
-    repo_roots: tuple[str, ...] = ("~/Documents/git",)
+    repo_roots: tuple[str, ...] = ("~/src",)
     #: Worktrees go in <worktree_root>/<repo>/wp-<number>; clones missing locally go in _clones/.
-    worktree_root: str = "~/Documents/git/worktrees/workplane"
+    worktree_root: str = "~/.local/share/workplane/worktrees"
     #: Run logs and omp session files.
     state_dir: str = "~/.local/state/workplane"
     max_concurrent: int = 2
@@ -31,7 +31,7 @@ class RunnerConfig:
 
 @dataclass(frozen=True, slots=True)
 class Config:
-    database_url: str
+    database_path: Path
     github_token: str | None = None
     #: GitHub logins that count as "me": my issues go to the backlog, not the inbox.
     me: tuple[str, ...] = ()
@@ -76,16 +76,22 @@ class Config:
         return dt.datetime.now(ZoneInfo(self.timezone)).date()
 
 
+def _config_home() -> Path:
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+
+
+def _data_home() -> Path:
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+
+
 def load(path: Path | None = None, **overrides: object) -> Config:
-    """Read ``WORKPLANE_CONFIG`` (default ``./workplane.toml``) plus environment."""
-    path = path or Path(os.environ.get("WORKPLANE_CONFIG", "workplane.toml"))
+    """Read ``WORKPLANE_CONFIG`` (default ``~/.config/workplane/config.toml``) plus environment."""
+    path = path or Path(os.environ.get("WORKPLANE_CONFIG") or _config_home() / "workplane" / "config.toml")
     data = tomllib.loads(path.read_text()) if path.exists() else {}
     gh = data.get("github", {})
     noise = data.get("noise", {})
     values: dict[str, object] = {
-        "database_url": os.environ.get(
-            "DATABASE_URL", "postgresql://workplane:workplane@localhost:5433/workplane"
-        ),
+        "database_path": Path(os.environ.get("WORKPLANE_DB") or _data_home() / "workplane" / "workplane.db"),
         "github_token": os.environ.get("GITHUB_TOKEN") or None,
         "me": tuple(data.get("me", ())),
         "wip_limit": int(data.get("wip_limit", 15)),

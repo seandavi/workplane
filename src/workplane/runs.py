@@ -10,14 +10,10 @@ new work statuses exist for agents:
 
 from __future__ import annotations
 
-import json
 from decimal import Decimal
 from typing import Any
 
-from psycopg import AsyncConnection
-from psycopg.types.json import Jsonb
-
-from . import work
+from . import db, work
 from .config import Config
 from .domain import Status, TransitionError
 
@@ -27,7 +23,6 @@ ACTIVE = ("starting", "running")
 TERMINAL_STATES = ("finished", "failed", "stopped")
 #: A running run whose heartbeat is older than this is shown as lost.
 STALE_SECONDS = 60
-NOTIFY_CHANNEL = "workplane"
 
 
 class RunLimitExceeded(Exception):
@@ -38,27 +33,22 @@ class RunConflict(Exception):
     pass
 
 
-async def notify(conn: AsyncConnection, **payload: Any) -> None:
-    """Tell live dashboards something changed (delivered at commit)."""
-    await conn.execute("SELECT pg_notify(%s, %s)", (NOTIFY_CHANNEL, json.dumps(payload)))
-
-
 _LIVE_STATE = f"""
     CASE WHEN r.state IN ('starting', 'running')
-              AND COALESCE(r.heartbeat_at, r.started_at) < now() - interval '{STALE_SECONDS} seconds'
+              AND COALESCE(r.heartbeat_at, r.started_at) < strftime('{db.TS_FORMAT}', 'now', '-{STALE_SECONDS} seconds')
          THEN 'lost' ELSE r.state END
 """
 
 _SELECT = f"""
     SELECT r.*, {_LIVE_STATE} AS live_state,
-           EXTRACT(EPOCH FROM (COALESCE(r.ended_at, now()) - r.started_at))::int AS elapsed_s,
+           CAST(ROUND((julianday(COALESCE(r.ended_at, {db.NOW})) - julianday(r.started_at)) * 86400) AS INTEGER) AS elapsed_s,
            w.title, w.repo, w.number, w.status AS item_status, w.url AS item_url
     FROM runs r JOIN work_view w ON w.id = r.work_item_id
 """
 
 
 async def create_run(
-    conn: AsyncConnection,
+    conn: db.Connection,
     cfg: Config,
     *,
     work_item_id: int,
@@ -79,7 +69,7 @@ async def create_run(
     """Claim the item for ``actor`` and record a new run, atomically."""
     async with conn.transaction():
         cur = await conn.execute(
-            f"SELECT count(*) AS n FROM runs r WHERE r.host = %s AND ({_LIVE_STATE}) IN ('starting', 'running')",
+            f"SELECT count(*) AS n FROM runs r WHERE r.host = ? AND ({_LIVE_STATE}) IN ('starting', 'running')",
             (host,),
         )
         active = (await cur.fetchone())["n"]
@@ -89,7 +79,7 @@ async def create_run(
                 "wait, stop one, or force"
             )
         cur = await conn.execute(
-            f"SELECT 1 FROM runs r WHERE r.work_item_id = %s AND ({_LIVE_STATE}) IN ('starting', 'running')",
+            f"SELECT 1 FROM runs r WHERE r.work_item_id = ? AND ({_LIVE_STATE}) IN ('starting', 'running')",
             (work_item_id,),
         )
         if await cur.fetchone():
@@ -106,10 +96,10 @@ async def create_run(
             conn, cfg, work_item_id, "start", actor=actor, payload={"force": True} if force else {}
         )
         cur = await conn.execute(
-            """
+            f"""
             INSERT INTO runs (work_item_id, resumed_from, harness, host, actor, worktree, branch,
                 base_ref, session_dir, log_path, model, prompt, harness_session_id, heartbeat_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {db.NOW})
             RETURNING id
             """,
             (
@@ -118,12 +108,12 @@ async def create_run(
             ),
         )
         run_id = (await cur.fetchone())["id"]
-        await notify(conn, kind="run_created", run=run_id, item=work_item_id)
+        conn.notify(kind="run_created", run=run_id, item=work_item_id)
     return await get_run(conn, run_id)
 
 
 async def record_events(
-    conn: AsyncConnection,
+    conn: db.Connection,
     run_id: int,
     events: list[dict[str, Any]],
     *,
@@ -137,7 +127,7 @@ async def record_events(
     and ``usage``). Anything else is stored as-is.
     """
     async with conn.transaction():
-        cur = await conn.execute("SELECT * FROM runs WHERE id = %s FOR UPDATE", (run_id,))
+        cur = await conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,))
         run = await cur.fetchone()
         if run is None:
             raise work.NotFound(f"run {run_id} not found")
@@ -165,37 +155,37 @@ async def record_events(
                 cost += Decimal(str((usage.get("cost") or {}).get("total") or 0))
                 model = payload.get("model") or model
             await conn.execute(
-                "INSERT INTO run_events (run_id, kind, summary, payload) VALUES (%s, %s, %s, %s)",
-                (run_id, kind or "unknown", ev.get("summary"), Jsonb(payload)),
+                "INSERT INTO run_events (run_id, kind, summary, payload) VALUES (?, ?, ?, ?)",
+                (run_id, kind or "unknown", ev.get("summary"), payload),
             )
 
-        assignments = ["heartbeat_at = now()"]
+        assignments = [f"heartbeat_at = {db.NOW}"]
         for column, delta in add.items():
             if delta:
-                assignments.append(f"{column} = {column} + %s")
+                assignments.append(f"{column} = {column} + ?")
                 params.append(delta)
         if cost:
-            assignments.append("cost_usd = cost_usd + %s")
+            assignments.append("cost_usd = cost_usd + ?")
             params.append(cost)
         if events:
-            assignments.append("last_event_at = now()")
+            assignments.append(f"last_event_at = {db.NOW}")
         if last_activity:
-            assignments.append("last_activity = %s")
+            assignments.append("last_activity = ?")
             params.append(last_activity[:200])
         if model:
-            assignments.append("model = %s")
+            assignments.append("model = ?")
             params.append(model)
         if pid is not None:
-            assignments.append("pid = %s")
+            assignments.append("pid = ?")
             params.append(pid)
         if harness_session_id:
-            assignments.append("harness_session_id = %s")
+            assignments.append("harness_session_id = ?")
             params.append(harness_session_id)
         if run["state"] == "starting":
             assignments.append("state = 'running'")
         params.append(run_id)
-        await conn.execute(f"UPDATE runs SET {', '.join(assignments)} WHERE id = %s", params)
-        await notify(conn, kind="run_event", run=run_id, item=run["work_item_id"])
+        await conn.execute(f"UPDATE runs SET {', '.join(assignments)} WHERE id = ?", params)
+        conn.notify(kind="run_event", run=run_id, item=run["work_item_id"])
     return await get_run(conn, run_id)
 
 
@@ -220,7 +210,7 @@ _REASONS = {
 
 
 async def finish_run(
-    conn: AsyncConnection,
+    conn: db.Connection,
     cfg: Config,
     run_id: int,
     *,
@@ -234,7 +224,7 @@ async def finish_run(
     if state not in TERMINAL_STATES:
         raise work.InvalidPayload(f"state must be one of {', '.join(TERMINAL_STATES)}")
     async with conn.transaction():
-        cur = await conn.execute("SELECT * FROM runs WHERE id = %s FOR UPDATE", (run_id,))
+        cur = await conn.execute("SELECT * FROM runs WHERE id = ?", (run_id,))
         run = await cur.fetchone()
         if run is None:
             raise work.NotFound(f"run {run_id} not found")
@@ -242,9 +232,9 @@ async def finish_run(
             return await get_run(conn, run_id)
         outcome = _outcome(state, pr_url, final_message)
         await conn.execute(
-            "UPDATE runs SET state = %s, outcome = %s, exit_code = %s, final_message = %s,"
-            " pr_url = COALESCE(%s, pr_url), error = %s, ended_at = now(), heartbeat_at = now()"
-            " WHERE id = %s",
+            "UPDATE runs SET state = ?, outcome = ?, exit_code = ?, final_message = ?,"
+            f" pr_url = COALESCE(?, pr_url), error = ?, ended_at = {db.NOW}, heartbeat_at = {db.NOW}"
+            " WHERE id = ?",
             (state, outcome, exit_code, final_message, pr_url, error, run_id),
         )
         excerpt = (final_message or error or "").strip()[:500]
@@ -269,24 +259,24 @@ async def finish_run(
                 conn, cfg, run["work_item_id"], "note", actor=run["actor"],
                 payload={"text": f"run {run_id} ended ({outcome}); not moved: {exc}", "run": run_id},
             )
-        await notify(conn, kind="run_finished", run=run_id, item=run["work_item_id"])
+        conn.notify(kind="run_finished", run=run_id, item=run["work_item_id"])
     return await get_run(conn, run_id)
 
 
-async def request_stop(conn: AsyncConnection, cfg: Config, run_id: int) -> Row:
+async def request_stop(conn: db.Connection, cfg: Config, run_id: int) -> Row:
     """Ask the runner to stop at its next heartbeat; close a lost run right away."""
     run = await get_run(conn, run_id)
     if run["live_state"] == "lost":
         return await finish_run(conn, cfg, run_id, state="stopped", error="no heartbeat; closed by stop")
     if run["live_state"] in ACTIVE:
         async with conn.transaction():
-            await conn.execute("UPDATE runs SET stop_requested = TRUE WHERE id = %s", (run_id,))
-            await notify(conn, kind="run_event", run=run_id, item=run["work_item_id"])
+            await conn.execute("UPDATE runs SET stop_requested = 1 WHERE id = ?", (run_id,))
+            conn.notify(kind="run_event", run=run_id, item=run["work_item_id"])
     return await get_run(conn, run_id)
 
 
-async def get_run(conn: AsyncConnection, run_id: int) -> Row:
-    cur = await conn.execute(_SELECT + " WHERE r.id = %s", (run_id,))
+async def get_run(conn: db.Connection, run_id: int) -> Row:
+    cur = await conn.execute(_SELECT + " WHERE r.id = ?", (run_id,))
     row = await cur.fetchone()
     if row is None:
         raise work.NotFound(f"run {run_id} not found")
@@ -294,7 +284,7 @@ async def get_run(conn: AsyncConnection, run_id: int) -> Row:
 
 
 async def list_runs(
-    conn: AsyncConnection,
+    conn: db.Connection,
     *,
     active: bool = False,
     work_item_id: int | None = None,
@@ -305,39 +295,39 @@ async def list_runs(
     if active:
         where.append(f"({_LIVE_STATE}) IN ('starting', 'running', 'lost')")
     if work_item_id is not None:
-        where.append("r.work_item_id = %s")
+        where.append("r.work_item_id = ?")
         params.append(work_item_id)
     if since_hours is not None:
-        where.append("r.started_at > now() - make_interval(hours => %s)")
+        where.append(f"r.started_at > strftime('{db.TS_FORMAT}', 'now', '-' || ? || ' hours')")
         params.append(since_hours)
     sql = _SELECT + (" WHERE " + " AND ".join(where) if where else "")
-    sql += " ORDER BY r.started_at DESC LIMIT %s"
+    sql += " ORDER BY r.started_at DESC LIMIT ?"
     params.append(limit)
     cur = await conn.execute(sql, params)
     return await cur.fetchall()
 
 
-async def latest_run(conn: AsyncConnection, work_item_id: int) -> Row | None:
+async def latest_run(conn: db.Connection, work_item_id: int) -> Row | None:
     runs = await list_runs(conn, work_item_id=work_item_id, limit=1)
     return runs[0] if runs else None
 
 
-async def run_events(conn: AsyncConnection, run_id: int, *, after_id: int = 0, limit: int = 500) -> list[Row]:
+async def run_events(conn: db.Connection, run_id: int, *, after_id: int = 0, limit: int = 500) -> list[Row]:
     cur = await conn.execute(
-        "SELECT * FROM run_events WHERE run_id = %s AND id > %s ORDER BY id LIMIT %s",
+        "SELECT * FROM run_events WHERE run_id = ? AND id > ? ORDER BY id LIMIT ?",
         (run_id, after_id, limit),
     )
     return await cur.fetchall()
 
 
-async def run_stats(conn: AsyncConnection) -> Row:
+async def run_stats(conn: db.Connection) -> Row:
     cur = await conn.execute(
         f"""
         SELECT
           count(*) FILTER (WHERE ({_LIVE_STATE}) IN ('starting', 'running')) AS active,
           count(*) FILTER (WHERE ({_LIVE_STATE}) = 'lost') AS lost,
-          count(*) FILTER (WHERE r.started_at > now() - interval '24 hours') AS runs_24h,
-          COALESCE(sum(r.cost_usd) FILTER (WHERE r.started_at > now() - interval '24 hours'), 0) AS cost_24h,
+          count(*) FILTER (WHERE r.started_at > strftime('{db.TS_FORMAT}', 'now', '-24 hours')) AS runs_24h,
+          COALESCE(sum(r.cost_usd) FILTER (WHERE r.started_at > strftime('{db.TS_FORMAT}', 'now', '-24 hours')), 0) AS cost_24h,
           count(*) FILTER (WHERE r.outcome = 'pr') AS prs_total
         FROM runs r
         """
