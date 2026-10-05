@@ -3,6 +3,18 @@ name = "workplane"
 version = "0.1.0"
 description = "A personal work queue over GitHub issues and manual tasks, with an event log and an enforced state machine."
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Sean Davis" }]
+keywords = ["github", "issues", "work-queue", "triage", "ai-agents"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Bug Tracking",
+]
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115",
@@ -14,6 +26,10 @@ dependencies = [
     "typer>=0.12",
     "tzdata>=2026.5",
 ]
+
+[project.urls]
+Homepage = "https://github.com/seandavi/workplane"
+Issues = "https://github.com/seandavi/workplane/issues"
 
 [project.scripts]
 work = "workplane.cli:app"

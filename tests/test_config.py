@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from workplane import config
 
 
@@ -26,3 +28,9 @@ def test_unattended_runs_need_an_explicit_approval_mode(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('[runner]\napproval_mode = "yolo"\n')
     assert config.load(path).runner.approval_mode == "yolo"
+
+
+def test_the_example_config_loads_and_does_not_opt_you_in_to_unattended_runs():
+    cfg = config.load(Path(__file__).parent.parent / "workplane.example.toml")
+    assert cfg.me and cfg.owners and cfg.areas
+    assert cfg.runner.approval_mode is None
