@@ -8,6 +8,14 @@ Agents run locally through `work run`: one omp session per GitHub issue, in its 
 
 workplane is a single-user tool: one person's queue, one SQLite file, no login. Planned work, including isolation for agent runs, is tracked in the [roadmap issues](https://github.com/seandavi/workplane/issues?q=is%3Aissue+label%3Aroadmap).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/seandavi/workplane/main/docs/img/cockpit-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/seandavi/workplane/main/docs/img/cockpit-light.png">
+  <img alt="The workplane cockpit: stat tiles, agent runs, what needs you, and the committed board" src="https://raw.githubusercontent.com/seandavi/workplane/main/docs/img/cockpit-dark.png">
+</picture>
+
+*The cockpit: stat tiles with the WIP meter, agent runs, what needs you right now, and the committed board. It follows your system's light or dark setting, and the header has a switch.*
+
 ## Install and run
 
 You need [uv](https://docs.astral.sh/uv/) (it fetches Python 3.13 if you don't have it) and a GitHub token that can read the repos you want to track. `gh auth token` works; for a dedicated token, any token with `repo` (private repos) or `public_repo` scope does, and it is only used to read.
