@@ -18,3 +18,11 @@ def test_database_lives_under_the_xdg_data_home_unless_overridden(tmp_path, monk
 
     monkeypatch.setenv("WORKPLANE_DB", str(tmp_path / "other.db"))
     assert config.load(tmp_path / "none.toml").database_path == tmp_path / "other.db"
+
+
+def test_unattended_runs_need_an_explicit_approval_mode(tmp_path):
+    assert config.load(tmp_path / "none.toml").runner.approval_mode is None
+
+    path = tmp_path / "config.toml"
+    path.write_text('[runner]\napproval_mode = "yolo"\n')
+    assert config.load(path).runner.approval_mode == "yolo"
