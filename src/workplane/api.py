@@ -7,6 +7,7 @@ import contextlib
 import datetime as dt
 import logging
 import dataclasses
+import hashlib
 from collections.abc import AsyncIterator
 from importlib import resources
 from typing import Any
@@ -27,6 +28,18 @@ log = logging.getLogger(__name__)
 
 _PKG = resources.files("workplane")
 templates = Jinja2Templates(directory=str(_PKG / "templates"))
+
+
+def _asset_version() -> str:
+    """Hash of the static files. It is appended to their URLs so a browser never pairs new
+    templates with a cached old stylesheet."""
+    digest = hashlib.sha1(usedforsecurity=False)
+    for path in sorted((_PKG / "static").iterdir(), key=lambda p: p.name):
+        digest.update(path.read_bytes())
+    return digest.hexdigest()[:8]
+
+
+templates.env.globals["asset_v"] = _asset_version()
 
 _ERRORS: dict[type[Exception], int] = {
     work.NotFound: 404,

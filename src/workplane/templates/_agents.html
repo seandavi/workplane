@@ -1,10 +1,10 @@
 {% import "_macros.html" as m %}
 {% set st = run_stats %}
 <h2>Agents
-  <span class="count">{{ st.active }} running{% if st.lost %} · <span class="lost">{{ st.lost }} lost</span>{% endif %}
-  · {{ st.runs_24h }} runs / ${{ '%.2f' % st.cost_24h }} in 24h · {{ st.prs_total }} PRs total</span>
-  <span class="hint">start one with <code>work run repo#N</code></span>
+  <span class="count">{{ st.active }} running{% if st.lost %} · <span class="lost">{{ st.lost }} lost</span>{% endif %}</span>
+  <span class="hint">{{ st.runs_24h }} runs / ${{ '%.2f' % st.cost_24h }} in 24h · {{ st.prs_total }} PRs total · start one with <code>work run repo#N</code></span>
 </h2>
+{% if active_runs %}<div class="sweep" aria-hidden="true"></div>{% endif %}
 {% if active_runs %}
 <table>
   {% for r in active_runs %}
