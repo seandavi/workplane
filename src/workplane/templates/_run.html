@@ -1,0 +1,61 @@
+{% import "_macros.html" as m %}
+<h1>{{ m.run_state(run) }} Run {{ run.id }}: {{ run.title }}</h1>
+<p>
+  {{ m.run_ref(run) }} · <a href="/items/{{ run.work_item_id }}">work item #{{ run.work_item_id }}</a>
+  · {{ run.actor }} · {{ run.model or 'default model' }}
+  {% if run.resumed_from %}· resumed from <a href="/runs/{{ run.resumed_from }}">run {{ run.resumed_from }}</a>{% endif %}
+</p>
+<section class="stats">
+  <span class="stat"><b>{{ m.duration(run.elapsed_s) }}</b> elapsed</span>
+  <span class="stat"><b>{{ run.turns }}</b> turns</span>
+  <span class="stat"><b>{{ run.tool_calls }}</b> tool calls{% if run.tool_errors %} ({{ run.tool_errors }} failed){% endif %}</span>
+  <span class="stat"><b>{{ '{:,}'.format(run.tokens_in + run.tokens_cache_read + run.tokens_cache_write) }}</b> in / <b>{{ '{:,}'.format(run.tokens_out) }}</b> out tokens</span>
+  <span class="stat"><b>${{ '%.2f' % run.cost_usd }}</b></span>
+  {% if run.pr_url %}<a class="stat hot" href="{{ run.pr_url }}" target="_blank" rel="noopener"><b>PR</b> open it</a>{% endif %}
+</section>
+
+{% if run.live_state in ('starting', 'running', 'lost') %}
+<form method="post" action="/runs/{{ run.id }}/stop" class="inline">
+  <input type="hidden" name="back" value="/runs/{{ run.id }}">
+  <button type="submit">{{ 'close lost run' if run.live_state == 'lost' else 'stop' }}</button>
+</form>
+{% if run.stop_requested %}<span class="muted">stop requested; the runner acts on its next heartbeat</span>{% endif %}
+{% endif %}
+
+{% if run.final_message or run.error %}
+<section class="panel">
+  <h2>{{ 'Error' if run.error else 'Final message' }}</h2>
+  <pre class="final">{{ run.error or run.final_message }}</pre>
+</section>
+{% endif %}
+
+<section class="panel">
+  <h2>Take over</h2>
+  <pre class="cmd"># one more unattended turn in the same session
+work resume {{ run.repo.split('/')[1] }}#{{ run.number }} "your reply"
+{% if run.harness_session_id %}
+# continue interactively
+cd {{ run.worktree }} && omp -r {{ run.harness_session_id[:8] }}
+{% endif %}
+# raw omp JSON
+tail -f {{ run.log_path }}</pre>
+  <p class="muted">Branch <code>{{ run.branch }}</code> from <code>{{ run.base_ref }}</code> on {{ run.host }}</p>
+</section>
+
+<section>
+  <h2>Activity <span class="count">{{ events|length }}</span></h2>
+  <table class="compact">
+    {% for e in events|reverse %}
+    <tr class="{{ 'err' if e.payload.get('is_error') else '' }}">
+      <td class="muted nowrap">{{ e.occurred_at.strftime('%H:%M:%S') }}</td>
+      <td><code>{{ e.payload.get('tool') or e.kind }}</code></td>
+      <td>
+        {% if e.kind == 'tool_start' %}{{ e.summary }}
+        {% elif e.kind == 'tool_end' %}{% if e.payload.get('is_error') %}<span class="lost">failed</span> {{ e.payload.get('error', '')[:300] }}{% else %}<span class="muted">ok</span>{% endif %}
+        {% elif e.kind == 'turn_end' %}<span class="muted">turn · {{ e.payload.get('model') }} · ${{ '%.3f' % ((e.payload.get('usage') or {}).get('cost') or {}).get('total', 0) }}</span>{% if e.summary %}<div>{{ e.summary }}</div>{% endif %}
+        {% else %}{{ e.summary }}{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>

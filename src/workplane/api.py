@@ -6,19 +6,21 @@ import asyncio
 import contextlib
 import datetime as dt
 import logging
+import dataclasses
 from collections.abc import AsyncIterator
 from importlib import resources
 from typing import Any
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Form, Query, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from . import db, work
+from . import db, runs, work
 from .config import Config, load
 from .domain import COMMANDS, COMMITTED, TERMINAL, Status, TransitionError, UnknownEvent, available_commands
 from .sync import run_sync
@@ -35,6 +37,8 @@ _ERRORS: dict[type[Exception], int] = {
     work.WipLimitExceeded: 409,
     work.InvalidPayload: 422,
     UnknownEvent: 422,
+    runs.RunLimitExceeded: 409,
+    runs.RunConflict: 409,
 }
 
 
@@ -52,6 +56,37 @@ class ManualIn(BaseModel):
     next_action: str | None = None
     priority: int | None = Field(default=None, ge=0, le=3)
     commit: bool = False
+
+
+class RunIn(BaseModel):
+    work_item_id: int
+    harness: str
+    host: str
+    actor: str
+    worktree: str
+    branch: str
+    prompt: str
+    base_ref: str | None = None
+    session_dir: str | None = None
+    log_path: str | None = None
+    model: str | None = None
+    resumed_from: int | None = None
+    harness_session_id: str | None = None
+    force: bool = False
+
+
+class RunEventsIn(BaseModel):
+    events: list[dict[str, Any]] = Field(default_factory=list)
+    pid: int | None = None
+    harness_session_id: str | None = None
+
+
+class RunFinishIn(BaseModel):
+    state: str
+    exit_code: int | None = None
+    final_message: str | None = None
+    pr_url: str | None = None
+    error: str | None = None
 
 
 async def _sync_loop(pool: AsyncConnectionPool, cfg: Config) -> None:
@@ -188,6 +223,113 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     async def api_sync(request: Request, full: bool = False) -> dict:
         return (await run_sync(pool(request), cfg, full=full)).as_dict()
 
+    # --- runs -------------------------------------------------------------
+
+    @app.get("/api/runner-config")
+    async def api_runner_config() -> dict:
+        return {**dataclasses.asdict(cfg.runner), "me": cfg.default_actor}
+
+    @app.post("/api/runs", status_code=201)
+    async def api_run_create(request: Request, body: RunIn) -> dict:
+        async with pool(request).connection() as conn:
+            return await runs.create_run(conn, cfg, **body.model_dump())
+
+    @app.get("/api/runs")
+    async def api_runs(
+        request: Request,
+        active: bool = False,
+        work_item_id: int | None = None,
+        since_hours: int | None = None,
+        limit: int = Query(50, le=500),
+    ) -> list[dict]:
+        async with pool(request).connection() as conn:
+            return await runs.list_runs(
+                conn, active=active, work_item_id=work_item_id, since_hours=since_hours, limit=limit
+            )
+
+    @app.get("/api/runs/{run_id}")
+    async def api_run(request: Request, run_id: int) -> dict:
+        async with pool(request).connection() as conn:
+            return await runs.get_run(conn, run_id)
+
+    @app.get("/api/runs/{run_id}/events")
+    async def api_run_events(request: Request, run_id: int, after: int = 0) -> list[dict]:
+        async with pool(request).connection() as conn:
+            return await runs.run_events(conn, run_id, after_id=after)
+
+    @app.post("/api/runs/{run_id}/events")
+    async def api_run_record(request: Request, run_id: int, body: RunEventsIn) -> dict:
+        async with pool(request).connection() as conn:
+            return await runs.record_events(
+                conn, run_id, body.events, pid=body.pid, harness_session_id=body.harness_session_id
+            )
+
+    @app.post("/api/runs/{run_id}/finish")
+    async def api_run_finish(request: Request, run_id: int, body: RunFinishIn) -> dict:
+        async with pool(request).connection() as conn:
+            return await runs.finish_run(conn, cfg, run_id, **body.model_dump())
+
+    @app.post("/api/runs/{run_id}/stop")
+    async def api_run_stop(request: Request, run_id: int) -> dict:
+        async with pool(request).connection() as conn:
+            return await runs.request_stop(conn, cfg, run_id)
+
+    @app.get("/api/stream")
+    async def api_stream(request: Request) -> StreamingResponse:
+        """Server-sent events: one message per run change (created, events, finished)."""
+
+        async def events() -> AsyncIterator[str]:
+            async with await AsyncConnection.connect(cfg.database_url, autocommit=True) as conn:
+                await conn.execute(f"LISTEN {runs.NOTIFY_CHANNEL}")
+                yield ": connected\n\n"
+                while not await request.is_disconnected():
+                    async for note in conn.notifies(timeout=15.0):
+                        yield f"data: {note.payload}\n\n"
+                    yield ": keepalive\n\n"
+
+        return StreamingResponse(
+            events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"}
+        )
+
+    async def _agents_ctx(conn: AsyncConnection) -> dict[str, Any]:
+        return {
+            "active_runs": await runs.list_runs(conn, active=True),
+            "recent_runs": [
+                r for r in await runs.list_runs(conn, since_hours=72, limit=20)
+                if r["live_state"] not in ("starting", "running", "lost")
+            ],
+            "run_stats": await runs.run_stats(conn),
+        }
+
+    @app.get("/fragments/agents")
+    async def fragment_agents(request: Request):
+        async with pool(request).connection() as conn:
+            ctx = await _agents_ctx(conn)
+        return render(request, "_agents.html", **ctx)
+
+    async def _run_ctx(conn: AsyncConnection, run_id: int) -> dict[str, Any]:
+        run = await runs.get_run(conn, run_id)
+        events = await runs.run_events(conn, run_id)
+        return {"run": run, "events": [e for e in events if e["kind"] in ("tool_start", "tool_end", "turn_end", "agent_end")]}
+
+    @app.get("/runs/{run_id}")
+    async def run_page(request: Request, run_id: int):
+        async with pool(request).connection() as conn:
+            ctx = await _run_ctx(conn, run_id)
+        return render(request, "run.html", **ctx)
+
+    @app.get("/fragments/run/{run_id}")
+    async def fragment_run(request: Request, run_id: int):
+        async with pool(request).connection() as conn:
+            ctx = await _run_ctx(conn, run_id)
+        return render(request, "_run.html", **ctx)
+
+    @app.post("/runs/{run_id}/stop")
+    async def run_stop(request: Request, run_id: int, back: str = Form("")):
+        async with pool(request).connection() as conn:
+            await runs.request_stop(conn, cfg, run_id)
+        return _redirect(back or f"/runs/{run_id}", msg=f"stop requested for run {run_id}")
+
     # --- dashboard --------------------------------------------------------
 
     def render(request: Request, name: str, **ctx: Any):
@@ -209,6 +351,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 conn, statuses=[s.value for s in COMMITTED], include_noise=True, limit=500
             )
             done = await work.recently_done(conn)
+            agents = await _agents_ctx(conn)
         columns = {
             s: [i for i in committed if i["status"] == s.value]
             for s in (Status.READY, Status.WORKING, Status.REVIEW, Status.BLOCKED)
@@ -221,6 +364,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             inbox=inbox,
             columns=columns,
             done=done,
+            **agents,
         )
 
     @app.get("/items")
@@ -254,12 +398,14 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         async with pool(request).connection() as conn:
             item = await work.get_item(conn, work_id)
             events = await work.get_events(conn, work_id)
+            item_runs = await runs.list_runs(conn, work_item_id=work_id, limit=20)
         return render(
             request,
             "item.html",
             item=item,
             events=events,
             commands=[(c, COMMANDS[c].help) for c in available_commands(Status(item["status"]))],
+            item_runs=item_runs,
         )
 
     @app.post("/items/{work_id}/act")

@@ -55,6 +55,26 @@
   </form>
 </section>
 
+{% if item.source == 'github' and item.kind == 'issue' %}
+<section>
+  <h2>Agent runs <span class="count">{{ item_runs|length }}</span>
+    <span class="hint"><code>work run {{ item.repo.split('/')[1] }}#{{ item.number }}</code>{% if item_runs %} · <code>work resume {{ item.repo.split('/')[1] }}#{{ item.number }} "reply"</code>{% endif %}</span></h2>
+  {% if item_runs %}
+  <table class="compact">
+    {% for r in item_runs %}
+    <tr>
+      <td>{{ m.run_state(r) }}</td>
+      <td><a href="/runs/{{ r.id }}">run {{ r.id }}</a></td>
+      <td class="muted nowrap">{{ r.started_at.strftime('%Y-%m-%d %H:%M') }} · {{ m.duration(r.elapsed_s) }} · ${{ '%.2f' % r.cost_usd }}</td>
+      <td>{% if r.pr_url %}<a href="{{ r.pr_url }}" target="_blank" rel="noopener">PR</a>{% endif %}</td>
+      <td class="muted">{{ (r.final_message or r.error or r.last_activity or '')[:160] }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+</section>
+{% endif %}
+
 <section>
   <h2>History</h2>
   <table class="compact">

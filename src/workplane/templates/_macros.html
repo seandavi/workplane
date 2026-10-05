@@ -24,3 +24,17 @@
     </form>
   {%- endfor -%}
 {%- endmacro %}
+
+{% macro run_state(r) -%}
+  {%- set s = r.live_state -%}
+  <span class="badge run-{{ s }}">{{ s }}{% if r.outcome and r.outcome != s and s not in ('starting', 'running', 'lost') %} · {{ r.outcome|replace('_', ' ') }}{% endif %}</span>
+{%- endmacro %}
+
+{% macro run_ref(r) -%}
+  <a class="ref" href="{{ r.item_url }}" target="_blank" rel="noopener">{{ r.repo.split('/')[1] }}#{{ r.number }}</a>
+{%- endmacro %}
+
+{% macro duration(seconds) -%}
+  {%- set s = seconds or 0 -%}
+  {%- if s < 60 %}{{ s }}s{% elif s < 3600 %}{{ s // 60 }}m {{ '%02d' % (s % 60) }}s{% else %}{{ s // 3600 }}h {{ '%02d' % (s % 3600 // 60) }}m{% endif -%}
+{%- endmacro %}

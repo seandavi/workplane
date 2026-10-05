@@ -78,3 +78,15 @@ td.actions { white-space: nowrap; text-align: right; }
 .badge.cancelled { background: #f5f5f5; color: #737373; }
 
 @media (max-width: 900px) { .board { grid-template-columns: 1fr 1fr; } }
+
+/* agent runs */
+.badge.run-starting, .badge.run-running { background: #dcfce7; color: #166534; }
+.badge.run-lost { background: #fee2e2; color: #991b1b; }
+.badge.run-finished { background: #e0e7ff; color: #3730a3; }
+.badge.run-failed { background: #fee2e2; color: #991b1b; }
+.badge.run-stopped { background: #f5f5f5; color: #737373; }
+.lost { color: var(--hot); }
+tr.err td { background: #fff7f5; }
+pre.final, pre.cmd { white-space: pre-wrap; background: #f6f7f9; border-radius: 6px; padding: .6rem .75rem; margin: .25rem 0; font-size: .85rem; }
+details summary { cursor: pointer; margin: .5rem 0; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85em; }

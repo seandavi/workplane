@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+import time
+from pathlib import Path
 from typing import Annotated, Any
 
 import httpx
@@ -276,6 +279,181 @@ def sync(ctx: typer.Context, full: Annotated[bool, typer.Option(help="Re-fetch e
     )
     for err in report["errors"][:10]:
         typer.secho(f"  {err}", fg="yellow")
+
+
+# --- agent runs ------------------------------------------------------------
+
+
+def _run_line(r: dict) -> str:
+    state = r["live_state"] + (f" ({r['outcome']})" if r.get("outcome") else "")
+    mins, secs = divmod(r.get("elapsed_s") or 0, 60)
+    tail = r.get("pr_url") or r.get("last_activity") or ""
+    return (
+        f"{r['id']:>5}  {state:<20} {_ref(r):<28} {mins:>3}m{secs:02d}s  ${float(r['cost_usd']):6.2f}  "
+        f"{r['tool_calls']:>3} tools  {tail}"
+    )
+
+
+def _start_run(
+    api: Api,
+    ref: str,
+    *,
+    resume_message: str | None,
+    model: str | None,
+    thinking: str | None,
+    max_time: str | None,
+    force: bool,
+    foreground: bool,
+) -> None:
+    from . import runner  # the runner pulls in asyncio/subprocess machinery the other commands don't need
+
+    base = str(api.http.base_url).rstrip("/")
+    work_id = api.resolve(ref)
+
+    async def prepare() -> dict:
+        client = runner.Api(base)
+        try:
+            return await runner.prepare(client, work_id, resume_message=resume_message, model=model, force=force)
+        finally:
+            await client.aclose()
+
+    try:
+        run = asyncio.run(prepare())
+    except runner.RunnerError as exc:
+        typer.secho(f"error: {exc}", fg="red", err=True)
+        raise typer.Exit(1) from None
+    if api.as_json:
+        _dump(run)
+    else:
+        verb = "resumed" if resume_message is not None else "started"
+        typer.echo(f"run {run['id']} {verb} on {_ref(run)}  ({run['actor']})")
+        typer.echo(f"  worktree  {run['worktree']}  [{run['branch']}]")
+        typer.echo(f"  watch     work tail {_ref(run)} -f   or   {base}/runs/{run['id']}")
+    if foreground:
+        code = asyncio.run(runner.execute(base, run["id"], thinking=thinking, max_time=max_time))
+        final = api.call("GET", f"/api/runs/{run['id']}")
+        typer.echo(_run_line(final))
+        raise typer.Exit(1 if code else 0)
+    runner.spawn(base, run["id"], state_dir=Path(run["log_path"]).parent.parent, thinking=thinking, max_time=max_time)
+
+
+@app.command("run")
+def run_(
+    ctx: typer.Context,
+    ref: Ref,
+    model: Annotated[str | None, typer.Option(help="omp model (fuzzy match), default from config")] = None,
+    thinking: Annotated[str | None, typer.Option(help="omp thinking level")] = None,
+    max_time: Annotated[str | None, typer.Option(help="Stop the agent after this long, e.g. 45m")] = None,
+    force: Annotated[bool, typer.Option(help="Ignore WIP/concurrency limits and other claims")] = False,
+    foreground: Annotated[bool, typer.Option(help="Run in this terminal instead of detaching")] = False,
+) -> None:
+    """Start an omp agent on a GitHub issue in its own worktree. It ends with a PR or a question."""
+    _start_run(_api(ctx), ref, resume_message=None, model=model, thinking=thinking,
+               max_time=max_time, force=force, foreground=foreground)
+
+
+@app.command()
+def resume(
+    ctx: typer.Context,
+    ref: Ref,
+    message: Annotated[str, typer.Argument(help="Your reply: an answer, review feedback, or a nudge")],
+    model: Annotated[str | None, typer.Option(help="omp model (fuzzy match)")] = None,
+    thinking: str | None = None,
+    max_time: str | None = None,
+    force: bool = False,
+    foreground: bool = False,
+) -> None:
+    """Give the agent one more unattended turn in the same omp session and worktree."""
+    _start_run(_api(ctx), ref, resume_message=message, model=model, thinking=thinking,
+               max_time=max_time, force=force, foreground=foreground)
+
+
+def _target_run(api: Api, ref: str | None, run_id: int | None, *, active: bool = False) -> dict:
+    if run_id is not None:
+        return api.call("GET", f"/api/runs/{run_id}")
+    if ref is None:
+        typer.secho("give a work reference or --run", fg="red", err=True)
+        raise typer.Exit(1)
+    params: dict[str, Any] = {"work_item_id": api.resolve(ref), "limit": 1}
+    if active:
+        params["active"] = True
+    found = api.call("GET", "/api/runs", params=params)
+    if not found:
+        typer.secho(f"no {'active ' if active else ''}run for {ref}", fg="red", err=True)
+        raise typer.Exit(1)
+    return found[0]
+
+
+@app.command()
+def stop(
+    ctx: typer.Context,
+    ref: Annotated[str | None, typer.Argument(help="Work reference")] = None,
+    run_id: Annotated[int | None, typer.Option("--run", help="Run id")] = None,
+) -> None:
+    """Stop an active run. The runner acts on its next heartbeat (≤15s); lost runs close at once."""
+    api = _api(ctx)
+    run = _target_run(api, ref, run_id, active=run_id is None)
+    out = api.call("POST", f"/api/runs/{run['id']}/stop")
+    _dump(out) if api.as_json else typer.echo(_run_line(out))
+
+
+@app.command()
+def runs(ctx: typer.Context, hours: Annotated[int, typer.Option(help="Show runs started in the last N hours")] = 24) -> None:
+    """Active runs, then recent ones."""
+    api = _api(ctx)
+    rows = api.call("GET", "/api/runs", params={"since_hours": hours, "limit": 100})
+    active = api.call("GET", "/api/runs", params={"active": True})
+    seen = {r["id"] for r in active}
+    rows = active + [r for r in rows if r["id"] not in seen]
+    if api.as_json:
+        _dump(rows)
+        return
+    for r in rows:
+        typer.echo(_run_line(r))
+    if not rows:
+        typer.echo("(no runs)")
+
+
+def _event_line(e: dict) -> str:
+    t = e["occurred_at"][11:19]
+    p = e.get("payload") or {}
+    if e["kind"] == "tool_start":
+        return f"{t}  {p.get('tool', ''):<10} {e.get('summary') or ''}"
+    if e["kind"] == "tool_end":
+        return f"{t}  {p.get('tool', ''):<10} FAILED {p.get('error', '')[:200]}" if p.get("is_error") else ""
+    if e["kind"] == "turn_end":
+        cost = ((p.get("usage") or {}).get("cost") or {}).get("total", 0)
+        text = f"  {e['summary']}" if e.get("summary") else ""
+        return f"{t}  {'turn':<10} ${cost:.3f}{text}"
+    if e["kind"] == "session":
+        return f"{t}  {'session':<10} {e.get('summary')}"
+    return ""
+
+
+@app.command()
+def tail(
+    ctx: typer.Context,
+    ref: Annotated[str | None, typer.Argument(help="Work reference (its latest run)")] = None,
+    run_id: Annotated[int | None, typer.Option("--run", help="Run id")] = None,
+    follow: Annotated[bool, typer.Option("-f", "--follow", help="Keep printing until the run ends")] = False,
+) -> None:
+    """Print a run's activity: tool calls with their intent, failures, turns and cost."""
+    api = _api(ctx)
+    run = _target_run(api, ref, run_id)
+    after = 0
+    while True:
+        for e in api.call("GET", f"/api/runs/{run['id']}/events", params={"after": after}):
+            after = e["id"]
+            line = _event_line(e)
+            if line:
+                typer.echo(line)
+        run = api.call("GET", f"/api/runs/{run['id']}")
+        if not follow or run["live_state"] not in ("starting", "running"):
+            break
+        time.sleep(2)
+    typer.echo(_run_line(run))
+    if run.get("final_message") or run.get("error"):
+        typer.echo("\n" + (run.get("error") or run["final_message"]))
 
 
 if __name__ == "__main__":

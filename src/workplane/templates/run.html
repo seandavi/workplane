@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}run {{ run.id }} · workplane{% endblock %}
+{% block content %}
+<div data-fragment="/fragments/run/{{ run.id }}">
+  {% include "_run.html" %}
+</div>
+{% endblock %}

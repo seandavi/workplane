@@ -13,6 +13,10 @@
   <span class="stat muted">last sync {{ s.last_sync[:16].replace('T', ' ') ~ ' UTC' if s.last_sync else 'never' }}</span>
 </section>
 
+<section id="agents" data-fragment="/fragments/agents">
+  {% include "_agents.html" %}
+</section>
+
 <form method="post" action="/capture" class="capture">
   <input name="title" placeholder="Capture a task (email, letter, decision…)" required autofocus>
   <input name="area" placeholder="area" list="areas" size="10">
