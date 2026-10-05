@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from workplane import runs, work
+from workplane import db, runs, work
 from workplane.runner import final_text, normalize
 from workplane.sync import ingest_item
 
@@ -16,12 +16,12 @@ FIXTURE = Path(__file__).parent / "fixtures" / "omp_print_json.jsonl"
 
 async def _issue(conn, cfg, gh_item, number=1, **kw) -> int:
     await ingest_item(conn, cfg, gh_item(node_id=f"I_{number}", number=number, **kw), NOW)
-    return await work.resolve_ref(conn, cfg, f"bioc-edge#{number}")
+    return await work.resolve_ref(conn, cfg, f"web-app#{number}")
 
 
 async def _run(conn, cfg, work_id, **kw):
     args = dict(
-        work_item_id=work_id, harness="omp", host="mac", actor="omp@mac",
+        work_item_id=work_id, harness="omp", host="laptop", actor="omp@laptop",
         worktree="/tmp/wt", branch="wp/1-x", prompt="fix it",
     )
     args.update(kw)
@@ -29,10 +29,10 @@ async def _run(conn, cfg, work_id, **kw):
 
 
 async def test_run_claims_item_and_blocks_a_second_run(conn, cfg, gh_item):
-    work_id = await _issue(conn, cfg, gh_item, author="seandavi")  # starts in backlog
+    work_id = await _issue(conn, cfg, gh_item, author="alice")  # starts in backlog
     run = await _run(conn, cfg, work_id)
     item = await work.get_item(conn, work_id)
-    assert (item["status"], item["claimed_by"]) == ("working", "omp@mac")
+    assert (item["status"], item["claimed_by"]) == ("working", "omp@laptop")
     assert run["live_state"] == "starting"
 
     with pytest.raises(runs.RunConflict):
@@ -49,7 +49,7 @@ async def test_concurrency_limit_per_host(conn, cfg, gh_item):
 
 
 async def test_only_github_issues_can_be_run(conn, cfg, gh_item):
-    manual = (await work.create_manual(conn, cfg, title="write a letter", actor="seandavi"))["id"]
+    manual = (await work.create_manual(conn, cfg, title="write a letter", actor="alice"))["id"]
     pr = await _issue(conn, cfg, gh_item, number=9, kind="pr")
     for work_id in (manual, pr):
         with pytest.raises(work.InvalidPayload):
@@ -89,7 +89,7 @@ async def test_finishing_without_a_pr_blocks_on_me_with_the_agents_question(conn
     await runs.finish_run(conn, cfg, run["id"], state="finished", exit_code=0,
                           final_message="BLOCKED: which bucket should site builds use?")
     item = await work.get_item(conn, work_id)
-    assert (item["status"], item["waiting_on"]) == ("blocked", "seandavi")
+    assert (item["status"], item["waiting_on"]) == ("blocked", "alice")
     last = (await work.get_events(conn, work_id))[-1]
     assert "which bucket" in last["payload"]["reason"]
 
@@ -101,7 +101,7 @@ async def test_finishing_without_a_pr_blocks_on_me_with_the_agents_question(conn
 async def test_run_ending_after_the_item_moved_does_not_fail(conn, cfg, gh_item):
     work_id = await _issue(conn, cfg, gh_item)
     run = await _run(conn, cfg, work_id)
-    await work.apply_event(conn, cfg, work_id, "defer", actor="seandavi")
+    await work.apply_event(conn, cfg, work_id, "defer", actor="alice")
     done = await runs.finish_run(conn, cfg, run["id"], state="finished", pr_url="https://x/pull/1")
     assert done["outcome"] == "pr"
     assert (await work.get_item(conn, work_id))["status"] == "backlog"
@@ -116,8 +116,8 @@ async def test_stop_flags_live_runs_and_closes_lost_ones(conn, cfg, gh_item):
     lost_item = await _issue(conn, cfg, gh_item, number=2)
     lost = await _run(conn, cfg, lost_item)
     await conn.execute(
-        "UPDATE runs SET heartbeat_at = now() - interval '5 minutes', started_at = now() - interval '5 minutes'"
-        " WHERE id = %s", (lost["id"],),
+        f"UPDATE runs SET heartbeat_at = strftime('{db.TS_FORMAT}', 'now', '-5 minutes'),"
+        f" started_at = strftime('{db.TS_FORMAT}', 'now', '-5 minutes') WHERE id = ?", (lost["id"],),
     )
     assert (await runs.get_run(conn, lost["id"]))["live_state"] == "lost"
     closed = await runs.request_stop(conn, cfg, lost["id"])

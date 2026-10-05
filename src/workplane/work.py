@@ -11,9 +11,6 @@ import datetime as dt
 import re
 from typing import Any
 
-from psycopg import AsyncConnection
-from psycopg.types.json import Jsonb
-
 from . import db
 from .config import Config
 from .domain import (
@@ -55,7 +52,7 @@ class InvalidPayload(Exception):
 
 
 async def apply_event(
-    conn: AsyncConnection,
+    conn: db.Connection,
     cfg: Config,
     work_id: int,
     event_type: str,
@@ -77,14 +74,13 @@ async def apply_event(
     async with conn.transaction():
         if dedupe_key:
             cur = await conn.execute(
-                "SELECT * FROM work_events WHERE dedupe_key = %s", (dedupe_key,)
+                "SELECT * FROM work_events WHERE dedupe_key = ?", (dedupe_key,)
             )
             if existing := await cur.fetchone():
                 return existing
-        if event_type == "commit":
-            # Serialize commits so two concurrent ones cannot both slip under the limit.
-            await conn.execute("SELECT pg_advisory_xact_lock(%s)", (db.WIP_LOCK,))
-        cur = await conn.execute("SELECT * FROM work_items WHERE id = %s FOR UPDATE", (work_id,))
+        # transaction() is BEGIN IMMEDIATE: one writer at a time, so two concurrent commits
+        # cannot both slip under the WIP limit.
+        cur = await conn.execute("SELECT * FROM work_items WHERE id = ?", (work_id,))
         item = await cur.fetchone()
         if item is None:
             raise NotFound(f"work item {work_id} not found")
@@ -95,7 +91,7 @@ async def apply_event(
 
         if event_type == "commit" and cfg.wip_limit > 0 and not force:
             cur = await conn.execute(
-                "SELECT count(*) AS n FROM work_items WHERE status = ANY(%s) AND id <> %s",
+                "SELECT count(*) AS n FROM work_items WHERE status IN (SELECT value FROM json_each(?)) AND id <> ?",
                 ([s.value for s in COMMITTED], work_id),
             )
             n = (await cur.fetchone())["n"]
@@ -143,14 +139,14 @@ async def apply_event(
         cur = await conn.execute(
             "INSERT INTO work_events"
             " (work_item_id, actor, event_type, from_status, to_status, payload, dedupe_key)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *",
+            " VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING *",
             (
                 work_id,
                 actor,
                 event_type,
                 current.value,
                 changes.get("status", current.value),
-                Jsonb(_jsonable(payload)),
+                _jsonable(payload),
                 dedupe_key,
             ),
         )
@@ -159,16 +155,16 @@ async def apply_event(
         return event
 
 
-async def _update_projection(conn: AsyncConnection, work_id: int, changes: dict[str, Any]) -> None:
-    sets = ["updated_at = now()"]
+async def _update_projection(conn: db.Connection, work_id: int, changes: dict[str, Any]) -> None:
+    sets = [f"updated_at = {db.NOW}"]
     params: list[Any] = []
     for key, value in changes.items():
-        sets.append(f"{key} = %s")
+        sets.append(f"{key} = ?")
         params.append(value)
     if "status" in changes:
-        sets.append("status_changed_at = now()")
+        sets.append(f"status_changed_at = {db.NOW}")
     params.append(work_id)
-    await conn.execute(f"UPDATE work_items SET {', '.join(sets)} WHERE id = %s", params)
+    await conn.execute(f"UPDATE work_items SET {', '.join(sets)} WHERE id = ?", params)
 
 
 def _jsonable(payload: dict[str, Any]) -> dict[str, Any]:
@@ -176,7 +172,7 @@ def _jsonable(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 async def create_manual(
-    conn: AsyncConnection,
+    conn: db.Connection,
     cfg: Config,
     *,
     title: str,
@@ -194,14 +190,14 @@ async def create_manual(
     async with conn.transaction():
         cur = await conn.execute(
             "INSERT INTO work_items (source, title, status, area, due_on, next_action, priority)"
-            " VALUES ('manual', %s, 'inbox', %s, %s, %s, %s) RETURNING id",
+            " VALUES ('manual', ?, 'inbox', ?, ?, ?, ?) RETURNING id",
             (title, area or None, due_on, next_action or None, priority),
         )
         work_id = (await cur.fetchone())["id"]
         await conn.execute(
             "INSERT INTO work_events (work_item_id, actor, event_type, to_status, payload)"
-            " VALUES (%s, %s, 'created', 'inbox', %s)",
-            (work_id, actor, Jsonb({"title": title})),
+            " VALUES (?, ?, 'created', 'inbox', ?)",
+            (work_id, actor, {"title": title}),
         )
         if commit:
             await apply_event(conn, cfg, work_id, "commit", actor=actor)
@@ -213,7 +209,7 @@ async def create_manual(
 _REF = re.compile(r"^(?:(?P<owner>[\w.-]+)/)?(?P<repo>[\w.-]+)#(?P<num>\d+)$")
 
 
-async def resolve_ref(conn: AsyncConnection, cfg: Config, ref: str) -> int:
+async def resolve_ref(conn: db.Connection, cfg: Config, ref: str) -> int:
     """Turn ``42``, ``repo#7`` or ``owner/repo#7`` into a work-item id."""
     ref = ref.strip()
     if ref.isdigit():
@@ -223,13 +219,13 @@ async def resolve_ref(conn: AsyncConnection, cfg: Config, ref: str) -> int:
         raise NotFound(f"not a work reference: {ref!r}")
     if m["owner"]:
         cur = await conn.execute(
-            "SELECT id FROM work_view WHERE lower(repo) = lower(%s) AND number = %s",
+            "SELECT id FROM work_view WHERE lower(repo) = lower(?) AND number = ?",
             (f"{m['owner']}/{m['repo']}", int(m["num"])),
         )
     else:
         cur = await conn.execute(
-            "SELECT id, repo FROM work_view WHERE lower(split_part(repo, '/', 2)) = lower(%s)"
-            " AND number = %s",
+            "SELECT id, repo FROM work_view WHERE lower(substr(repo, instr(repo, '/') + 1)) = lower(?)"
+            " AND number = ?",
             (m["repo"], int(m["num"])),
         )
     rows = await cur.fetchall()
@@ -241,17 +237,17 @@ async def resolve_ref(conn: AsyncConnection, cfg: Config, ref: str) -> int:
     return rows[0]["id"]
 
 
-async def get_item(conn: AsyncConnection, work_id: int) -> Row:
-    cur = await conn.execute("SELECT * FROM work_view WHERE id = %s", (work_id,))
+async def get_item(conn: db.Connection, work_id: int) -> Row:
+    cur = await conn.execute("SELECT * FROM work_view WHERE id = ?", (work_id,))
     row = await cur.fetchone()
     if row is None:
         raise NotFound(f"work item {work_id} not found")
     return row
 
 
-async def get_events(conn: AsyncConnection, work_id: int) -> list[Row]:
+async def get_events(conn: db.Connection, work_id: int) -> list[Row]:
     cur = await conn.execute(
-        "SELECT * FROM work_events WHERE work_item_id = %s ORDER BY occurred_at, id", (work_id,)
+        "SELECT * FROM work_events WHERE work_item_id = ? ORDER BY occurred_at, id", (work_id,)
     )
     return await cur.fetchall()
 
@@ -263,7 +259,7 @@ _ORDER = (
 
 
 async def list_items(
-    conn: AsyncConnection,
+    conn: db.Connection,
     *,
     statuses: list[str] | None = None,
     area: str | None = None,
@@ -275,29 +271,29 @@ async def list_items(
     where: list[str] = []
     params: list[Any] = []
     if statuses:
-        where.append("status = ANY(%s)")
+        where.append("status IN (SELECT value FROM json_each(?))")
         params.append(statuses)
     if area:
-        where.append("area = %s")
+        where.append("area = ?")
         params.append(area)
     if repo:
-        where.append("(lower(repo) = lower(%s) OR lower(split_part(repo, '/', 2)) = lower(%s))")
+        where.append("(lower(repo) = lower(?) OR lower(substr(repo, instr(repo, '/') + 1)) = lower(?))")
         params += [repo, repo]
     if query:
-        where.append("(title ILIKE %s OR repo ILIKE %s)")
+        where.append("(title LIKE ? OR repo LIKE ?)")
         params += [f"%{query}%", f"%{query}%"]
     if not include_noise:
         where.append("NOT is_noise")
     sql = "SELECT * FROM work_view"
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += _ORDER + " LIMIT %s"
+    sql += _ORDER + " LIMIT ?"
     params.append(limit)
     cur = await conn.execute(sql, params)
     return await cur.fetchall()
 
 
-async def needs_me(conn: AsyncConnection, cfg: Config, *, horizon_days: int = 2) -> list[Row]:
+async def needs_me(conn: db.Connection, cfg: Config, *, horizon_days: int = 2) -> list[Row]:
     """Open items waiting on me, each with a ``why``.
 
     * blocked and ``waiting_on`` is me
@@ -309,23 +305,27 @@ async def needs_me(conn: AsyncConnection, cfg: Config, *, horizon_days: int = 2)
     cutoff = cfg.today() + dt.timedelta(days=horizon_days)
     sql = """
         SELECT *, CASE
-            WHEN status = 'blocked' AND lower(waiting_on) = ANY(%(me)s) THEN 'blocked on you'
-            WHEN status = 'review' AND (claimed_by IS NULL OR NOT lower(claimed_by) = ANY(%(me)s))
+            WHEN status = 'blocked' AND lower(waiting_on) IN (SELECT value FROM json_each(:me))
+                THEN 'blocked on you'
+            WHEN status = 'review'
+                 AND (claimed_by IS NULL OR lower(claimed_by) NOT IN (SELECT value FROM json_each(:me)))
                 THEN 'ready for your review'
             WHEN kind = 'pr' AND github_state = 'open'
-                 AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(review_requests) r
-                             WHERE lower(r) = ANY(%(me)s)) THEN 'review requested on GitHub'
-            WHEN due_on IS NOT NULL AND due_on < %(today)s THEN 'overdue'
+                 AND EXISTS (SELECT 1 FROM json_each(review_requests) r
+                             WHERE lower(r.value) IN (SELECT value FROM json_each(:me)))
+                THEN 'review requested on GitHub'
+            WHEN due_on IS NOT NULL AND due_on < :today THEN 'overdue'
             ELSE 'due soon'
         END AS why
         FROM work_view
-        WHERE status <> ALL(%(terminal)s) AND NOT is_noise AND (
-            (status = 'blocked' AND lower(waiting_on) = ANY(%(me)s))
-            OR (status = 'review' AND (claimed_by IS NULL OR NOT lower(claimed_by) = ANY(%(me)s)))
+        WHERE status NOT IN (SELECT value FROM json_each(:terminal)) AND NOT is_noise AND (
+            (status = 'blocked' AND lower(waiting_on) IN (SELECT value FROM json_each(:me)))
+            OR (status = 'review'
+                AND (claimed_by IS NULL OR lower(claimed_by) NOT IN (SELECT value FROM json_each(:me))))
             OR (kind = 'pr' AND github_state = 'open'
-                AND EXISTS (SELECT 1 FROM jsonb_array_elements_text(review_requests) r
-                            WHERE lower(r) = ANY(%(me)s)))
-            OR (due_on IS NOT NULL AND due_on <= %(cutoff)s)
+                AND EXISTS (SELECT 1 FROM json_each(review_requests) r
+                            WHERE lower(r.value) IN (SELECT value FROM json_each(:me))))
+            OR (due_on IS NOT NULL AND due_on <= :cutoff)
         )
         ORDER BY due_on NULLS LAST, priority NULLS LAST, updated_at DESC
     """
@@ -336,34 +336,34 @@ async def needs_me(conn: AsyncConnection, cfg: Config, *, horizon_days: int = 2)
     return await cur.fetchall()
 
 
-async def recently_done(conn: AsyncConnection, *, days: int = 7, limit: int = 30) -> list[Row]:
+async def recently_done(conn: db.Connection, *, days: int = 7, limit: int = 30) -> list[Row]:
     cur = await conn.execute(
-        "SELECT * FROM work_view WHERE status = ANY(%s) AND NOT is_noise"
-        " AND status_changed_at > now() - make_interval(days => %s)"
-        " ORDER BY status_changed_at DESC LIMIT %s",
+        "SELECT * FROM work_view WHERE status IN (SELECT value FROM json_each(?)) AND NOT is_noise"
+        f" AND status_changed_at > strftime('{db.TS_FORMAT}', 'now', '-' || ? || ' days')"
+        " ORDER BY status_changed_at DESC LIMIT ?",
         ([s.value for s in TERMINAL], days, limit),
     )
     return await cur.fetchall()
 
 
-async def summary(conn: AsyncConnection, cfg: Config, *, stale_days: int = 14) -> Row:
+async def summary(conn: db.Connection, cfg: Config, *, stale_days: int = 14) -> Row:
     cur = await conn.execute(
         "SELECT status, count(*) AS n FROM work_view WHERE NOT is_noise GROUP BY status"
     )
     by_status = {r["status"]: r["n"] for r in await cur.fetchall()}
     cur = await conn.execute(
-        "SELECT count(*) AS n FROM work_items WHERE status = ANY(%s)"
-        " AND status_changed_at < now() - make_interval(days => %s)",
+        "SELECT count(*) AS n FROM work_items WHERE status IN (SELECT value FROM json_each(?))"
+        f" AND status_changed_at < strftime('{db.TS_FORMAT}', 'now', '-' || ? || ' days')",
         ([s.value for s in COMMITTED], stale_days),
     )
     stale = (await cur.fetchone())["n"]
     cur = await conn.execute(
-        "SELECT area, count(*) AS n FROM work_view WHERE status = ANY(%s) AND NOT is_noise"
+        "SELECT area, count(*) AS n FROM work_view WHERE status IN (SELECT value FROM json_each(?)) AND NOT is_noise"
         " GROUP BY area ORDER BY n DESC",
         ([s.value for s in COMMITTED | {Status.INBOX}],),
     )
     by_area = {r["area"] or "(none)": r["n"] for r in await cur.fetchall()}
-    cur = await conn.execute("SELECT count(*) AS n FROM work_view WHERE is_noise AND status <> ALL(%s)",
+    cur = await conn.execute("SELECT count(*) AS n FROM work_view WHERE is_noise AND status NOT IN (SELECT value FROM json_each(?))",
                              ([s.value for s in TERMINAL],))
     noise = (await cur.fetchone())["n"]
     cur = await conn.execute("SELECT value, updated_at FROM sync_state WHERE key = 'last_sync'")
