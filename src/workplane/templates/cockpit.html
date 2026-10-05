@@ -6,7 +6,8 @@
   <a class="stat {{ 'hot' if s.needs_me else '' }}" href="#needs"><b>{{ s.needs_me }}</b> need you</a>
   <a class="stat" href="/items?status=inbox"><b>{{ s.by_status.inbox }}</b> in inbox</a>
   <a class="stat {{ 'hot' if s.wip_limit and s.committed >= s.wip_limit else '' }}" href="/items?status=committed">
-    <b>{{ s.committed }}{% if s.wip_limit %}/{{ s.wip_limit }}{% endif %}</b> committed</a>
+    <b>{{ s.committed }}{% if s.wip_limit %}/{{ s.wip_limit }}{% endif %}</b> committed
+    {%- if s.wip_limit %}<span class="meter" style="--v: {{ [s.committed * 100 // s.wip_limit, 100]|min }}%"></span>{% endif %}</a>
   <span class="stat {{ 'warn' if s.stale_committed else '' }}"><b>{{ s.stale_committed }}</b> committed, untouched {{ s.stale_days }}d+</span>
   <a class="stat" href="/items?status=backlog"><b>{{ s.by_status.backlog }}</b> backlog</a>
   <a class="stat muted" href="/items?noise=true"><b>{{ s.open_noise }}</b> bot/alert items hidden</a>
@@ -46,7 +47,7 @@
   <h2>Committed</h2>
   <div class="board">
     {% for status, items in columns.items() %}
-    <div class="col">
+    <div class="col {{ status.value }}">
       <h3>{{ status.value }} <span class="count">{{ items|length }}</span></h3>
       {% for i in items %}
       <div class="card">

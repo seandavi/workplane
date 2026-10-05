@@ -9,10 +9,12 @@
   <span class="stat"><b>{{ m.duration(run.elapsed_s) }}</b> elapsed</span>
   <span class="stat"><b>{{ run.turns }}</b> turns</span>
   <span class="stat"><b>{{ run.tool_calls }}</b> tool calls{% if run.tool_errors %} ({{ run.tool_errors }} failed){% endif %}</span>
-  <span class="stat"><b>{{ '{:,}'.format(run.tokens_in + run.tokens_cache_read + run.tokens_cache_write) }}</b> in / <b>{{ '{:,}'.format(run.tokens_out) }}</b> out tokens</span>
-  <span class="stat"><b>${{ '%.2f' % run.cost_usd }}</b></span>
+  <span class="stat"><b>{{ '{:,}'.format(run.tokens_in + run.tokens_cache_read + run.tokens_cache_write) }}</b> tokens in</span>
+  <span class="stat"><b>{{ '{:,}'.format(run.tokens_out) }}</b> tokens out</span>
+  <span class="stat"><b>${{ '%.2f' % run.cost_usd }}</b> cost</span>
   {% if run.pr_url %}<a class="stat hot" href="{{ run.pr_url }}" target="_blank" rel="noopener"><b>PR</b> open it</a>{% endif %}
 </section>
+{% if run.live_state in ('starting', 'running') %}<div class="sweep" aria-hidden="true"></div>{% endif %}
 
 {% if run.live_state in ('starting', 'running', 'lost') %}
 <form method="post" action="/runs/{{ run.id }}/stop" class="inline">
