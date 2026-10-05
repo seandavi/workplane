@@ -1,0 +1,49 @@
+# Copy to ~/.config/workplane/config.toml (or point WORKPLANE_CONFIG at your copy).
+
+# GitHub logins that are "me". Issues you (or agents posting as you) file land in the backlog;
+# recent issues and PRs from anyone else land in the inbox. The first one is the default actor.
+me = ["your-github-login"]
+
+# IANA time zone; decides what "today" means for due dates.
+timezone = "UTC"
+
+# Max items in ready + working + review + blocked. `commit` refuses past this unless forced.
+# 0 turns the limit off.
+wip_limit = 15
+
+# On import, other people's open items newer than this go to the inbox; older ones go straight
+# to the backlog.
+inbox_window_days = 14
+
+# Only needed behind a reverse proxy that rewrites the Host header: origins (scheme://host[:port])
+# besides the server's own that may submit the dashboard's forms.
+# allowed_origins = ["https://workplane.example.ts.net"]
+
+[github]
+owners = ["your-github-login"]   # every non-archived, non-fork repo these accounts own
+repos = []                       # plus these, as "owner/name"
+include_forks = false
+
+# Alert bots and status heartbeats: kept, but hidden from the inbox and default views.
+# Authors ending in [bot] always count.
+[noise]
+title_patterns = ['\.service is failing$']
+authors = []
+
+# area -> repo globs (case-insensitive); first match wins.
+[areas]
+web = ["your-github-login/web-*"]
+tools = ["your-github-login/*-cli"]
+
+# Host-side agent runs (`work run`). Paths are on the machine running the CLI.
+[runner]
+repo_roots = ["~/src"]                                  # existing clones, matched by name + origin
+worktree_root = "~/.local/share/workplane/worktrees"
+state_dir = "~/.local/state/workplane"                  # run logs (raw omp JSON)
+max_concurrent = 2                                      # per host
+max_time = "45m"
+# Required for `work run`. An unattended agent cannot answer approval prompts, so omp has to be
+# told to skip them. Read SECURITY.md first, then uncomment:
+# approval_mode = "yolo"
+# model = "opus"                                        # default: omp's configured model
+# thinking = "medium"
