@@ -1,0 +1,87 @@
+"""Settings: secrets and endpoints from the environment, preferences from TOML."""
+
+from __future__ import annotations
+
+import datetime as dt
+import fnmatch
+import os
+import re
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+
+@dataclass(frozen=True, slots=True)
+class Config:
+    database_url: str
+    github_token: str | None = None
+    #: GitHub logins that count as "me": my issues go to the backlog, not the inbox.
+    me: tuple[str, ...] = ()
+    #: Max items in ready/working/review/blocked. 0 disables the limit.
+    wip_limit: int = 15
+    #: On import, issues from other people newer than this land in the inbox.
+    inbox_window_days: int = 14
+    #: Users/orgs whose non-archived repos are synced.
+    owners: tuple[str, ...] = ()
+    #: Extra repos to sync ("owner/name").
+    repos: tuple[str, ...] = ()
+    include_forks: bool = False
+    sync_interval_seconds: int = 600
+    noise_title_patterns: tuple[re.Pattern[str], ...] = ()
+    noise_authors: frozenset[str] = frozenset()
+    #: area name -> repo glob patterns; first match wins.
+    areas: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    #: IANA zone that decides what "today" is for due dates.
+    timezone: str = "UTC"
+
+    def area_for(self, full_name: str) -> str | None:
+        name = full_name.lower()
+        for area, patterns in self.areas.items():
+            if any(fnmatch.fnmatchcase(name, p.lower()) for p in patterns):
+                return area
+        return None
+
+    def is_noise(self, title: str, author: str | None) -> bool:
+        if author and (author in self.noise_authors or author.endswith("[bot]")):
+            return True
+        return any(p.search(title) for p in self.noise_title_patterns)
+
+    def is_me(self, login: str | None) -> bool:
+        return login is not None and login.lower() in {m.lower() for m in self.me}
+
+    @property
+    def default_actor(self) -> str:
+        return self.me[0] if self.me else "me"
+
+    def today(self) -> dt.date:
+        return dt.datetime.now(ZoneInfo(self.timezone)).date()
+
+
+def load(path: Path | None = None, **overrides: object) -> Config:
+    """Read ``WORKPLANE_CONFIG`` (default ``./workplane.toml``) plus environment."""
+    path = path or Path(os.environ.get("WORKPLANE_CONFIG", "workplane.toml"))
+    data = tomllib.loads(path.read_text()) if path.exists() else {}
+    gh = data.get("github", {})
+    noise = data.get("noise", {})
+    values: dict[str, object] = {
+        "database_url": os.environ.get(
+            "DATABASE_URL", "postgresql://workplane:workplane@localhost:5433/workplane"
+        ),
+        "github_token": os.environ.get("GITHUB_TOKEN") or None,
+        "me": tuple(data.get("me", ())),
+        "wip_limit": int(data.get("wip_limit", 15)),
+        "inbox_window_days": int(data.get("inbox_window_days", 14)),
+        "owners": tuple(gh.get("owners", ())),
+        "repos": tuple(gh.get("repos", ())),
+        "include_forks": bool(gh.get("include_forks", False)),
+        "sync_interval_seconds": int(
+            os.environ.get("SYNC_INTERVAL_SECONDS", gh.get("sync_interval_seconds", 600))
+        ),
+        "noise_title_patterns": tuple(re.compile(p) for p in noise.get("title_patterns", ())),
+        "noise_authors": frozenset(noise.get("authors", ())),
+        "areas": {k: tuple(v) for k, v in data.get("areas", {}).items()},
+        "timezone": str(data.get("timezone", "UTC")),
+    }
+    values.update(overrides)
+    return Config(**values)  # type: ignore[arg-type]
