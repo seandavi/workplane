@@ -13,7 +13,7 @@ def main() -> None:
     uvicorn.run(
         "workplane.api:create_app",
         factory=True,
-        host=os.environ.get("HOST", "0.0.0.0"),
+        host=os.environ.get("HOST", "127.0.0.1"),
         port=int(os.environ.get("PORT", "8642")),
         workers=1,  # the background sync loop assumes a single process
     )

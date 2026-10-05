@@ -26,7 +26,9 @@ class RunnerConfig:
     model: str | None = None
     thinking: str | None = None
     max_time: str = "45m"
-    approval_mode: str = "yolo"
+    #: Needed by `work run`: an unattended agent cannot answer approval prompts, so the harness
+    #: must be told to skip them. Unset on purpose; see SECURITY.md.
+    approval_mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +53,9 @@ class Config:
     areas: dict[str, tuple[str, ...]] = field(default_factory=dict)
     #: IANA zone that decides what "today" is for due dates.
     timezone: str = "UTC"
+    #: Origins (scheme://host[:port]) besides the server's own that may POST to it, for a reverse
+    #: proxy that rewrites the Host header.
+    allowed_origins: tuple[str, ...] = ()
     runner: RunnerConfig = field(default_factory=RunnerConfig)
 
     def area_for(self, full_name: str) -> str | None:
@@ -106,6 +111,7 @@ def load(path: Path | None = None, **overrides: object) -> Config:
         "noise_authors": frozenset(noise.get("authors", ())),
         "areas": {k: tuple(v) for k, v in data.get("areas", {}).items()},
         "timezone": str(data.get("timezone", "UTC")),
+        "allowed_origins": tuple(data.get("allowed_origins", ())),
         "runner": _runner(data.get("runner", {})),
     }
     values.update(overrides)
@@ -122,5 +128,5 @@ def _runner(data: dict) -> RunnerConfig:
         model=data.get("model") or None,
         thinking=data.get("thinking") or None,
         max_time=str(data.get("max_time", defaults.max_time)),
-        approval_mode=str(data.get("approval_mode", defaults.approval_mode)),
+        approval_mode=data.get("approval_mode") or None,
     )

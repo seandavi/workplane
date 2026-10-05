@@ -274,6 +274,12 @@ async def prepare(
 ) -> dict[str, Any]:
     """Create or reuse the worktree, build the prompt, and register the run."""
     cfg = await api.call("GET", "/api/runner-config")
+    if not cfg.get("approval_mode"):
+        raise RunnerError(
+            "approval_mode is not set in [runner]. An unattended agent cannot answer approval prompts, "
+            "so the harness has to be told to skip them: set approval_mode = \"yolo\" in the server "
+            "config once you have read SECURITY.md."
+        )
     item = await api.call("GET", f"/api/work/{work_id}")
     if item.get("source") != "github" or item.get("kind") != "issue":
         raise RunnerError("agents can only be run on GitHub issues")

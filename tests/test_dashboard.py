@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import re
 from collections.abc import AsyncIterator
 
@@ -84,3 +85,40 @@ async def test_pages_reference_assets_that_load(site):
     assert urls
     for url in urls:
         assert (await site.get(url)).status_code == 200, url
+
+
+async def test_cross_site_form_posts_are_refused(site):
+    evil = await site.post(
+        "/capture", data={"title": "from another site"}, headers={"Origin": "https://evil.example"}
+    )
+    assert evil.status_code == 403
+    dashboard = await site.post(
+        "/capture", data={"title": "from the dashboard"}, headers={"Origin": "http://testserver"}
+    )
+    assert dashboard.status_code == 303
+    cli = await site.post("/capture", data={"title": "from curl"})  # no Origin: not a browser form post
+    assert cli.status_code == 303
+
+    titles = [i["title"] for i in (await site.get("/api/work?status=inbox&limit=50")).json()]
+    assert "from the dashboard" in titles and "from curl" in titles
+    assert "from another site" not in titles
+
+
+async def test_a_proxys_origin_is_accepted_only_when_listed(cfg, gh_item):
+    proxied = dataclasses.replace(cfg, allowed_origins=("https://wp.example.ts.net",))
+    async with serve(proxied, gh_item) as client:
+        listed = await client.post("/capture", data={"title": "x"}, headers={"Origin": "https://wp.example.ts.net"})
+        other = await client.post("/capture", data={"title": "y"}, headers={"Origin": "https://evil.example"})
+    assert (listed.status_code, other.status_code) == (303, 403)
+
+
+async def test_form_redirects_cannot_leave_this_server(site):
+    item = (await site.post("/api/work", json={"title": "note target"})).json()
+    url = f"/items/{item['id']}/act"
+    for back in ("https://evil.example/x", "//evil.example/x", "/\\evil.example"):
+        resp = await site.post(url, data={"type": "note", "text": "hi", "back": back})
+        assert resp.status_code == 303
+        assert resp.headers["location"].startswith(f"/items/{item['id']}?"), back
+
+    resp = await site.post(url, data={"type": "note", "text": "hi", "back": "/items?status=inbox"})
+    assert resp.headers["location"].startswith("/items?status=inbox&")

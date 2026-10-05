@@ -11,13 +11,14 @@ import hashlib
 from collections.abc import AsyncIterator
 from importlib import resources
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import FastAPI, Form, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import db, runs, work
 from .config import Config, load
@@ -134,6 +135,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     app = FastAPI(title="workplane", lifespan=lifespan)
     app.mount("/static", StaticFiles(directory=str(_PKG / "static")), name="static")
     app.state.cfg = cfg
+    app.add_middleware(SameOriginPosts, allowed=cfg.allowed_origins)
 
     for exc_type, code in _ERRORS.items():
 
@@ -338,7 +340,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     async def run_stop(request: Request, run_id: int, back: str = Form("")):
         async with database(request).connection() as conn:
             await runs.request_stop(conn, cfg, run_id)
-        return _redirect(back or f"/runs/{run_id}", msg=f"stop requested for run {run_id}")
+        return _redirect(_local_path(back, f"/runs/{run_id}"), msg=f"stop requested for run {run_id}")
 
     # --- dashboard --------------------------------------------------------
 
@@ -446,7 +448,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             payload = {"priority": priority, "due_on": due_on, "next_action": next_action, "area": area}
         elif reason:
             payload["reason"] = reason
-        target = back or f"/items/{work_id}"
+        target = _local_path(back, f"/items/{work_id}")
         try:
             async with database(request).connection() as conn:
                 await work.apply_event(conn, cfg, work_id, type, actor=cfg.default_actor, payload=payload)
@@ -510,3 +512,37 @@ def _redirect(path: str, **params: str) -> RedirectResponse:
     sep = "&" if "?" in path else "?"
     clean = {k: v for k, v in params.items() if v}
     return RedirectResponse(f"{path}{sep}{urlencode(clean)}" if clean else path, status_code=303)
+
+
+def _local_path(value: str, default: str) -> str:
+    """A redirect target taken from a form field. Only paths on this server pass, so a crafted
+    form cannot bounce the browser to another site."""
+    if value.startswith("/") and not value.startswith(("//", "/\\")):
+        return value
+    return default
+
+
+class SameOriginPosts:
+    """Refuse form posts that another website made your browser send.
+
+    Browsers label a cross-site POST with an ``Origin`` header, so a POST whose origin is neither
+    this server nor one of ``allowed_origins`` is refused. Requests without ``Origin`` (the CLI,
+    the runner, curl) are not browser form posts and pass.
+    """
+
+    def __init__(self, app: ASGIApp, allowed: tuple[str, ...] = ()) -> None:
+        self.app = app
+        self.allowed = allowed
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope["method"] == "POST":
+            headers = dict(scope["headers"])
+            origin = headers.get(b"origin", b"").decode()
+            host = headers.get(b"host", b"").decode()
+            if origin and urlsplit(origin).netloc != host and origin not in self.allowed:
+                refusal = JSONResponse(
+                    {"error": "cross-site request refused", "kind": "CrossSite"}, status_code=403
+                )
+                await refusal(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
