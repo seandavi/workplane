@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}{{ item.title }} · workplane{% endblock %}
+{% block content %}
+{% set back = '/items/' ~ item.id %}
+<h1><span class="badge {{ item.status }}">{{ item.status }}</span> {{ item.title }}</h1>
+<p>{{ m.ref(item) }} {{ m.meta(item, today) }}
+  {% if item.labels %}{% for l in item.labels %}<span class="tag label">{{ l }}</span>{% endfor %}{% endif %}
+  {% if item.github_state and item.github_state != 'open' %}<span class="tag">GitHub: {{ item.github_state }}</span>{% endif %}
+</p>
+{% if item.next_action %}<p class="next">Next action: {{ item.next_action }}</p>{% endif %}
+
+<section class="panel">
+  <h2>Move it</h2>
+  <div class="actions">
+    {% for name, help in commands if name != 'block' %}
+      <form method="post" action="/items/{{ item.id }}/act" class="inline">
+        <input type="hidden" name="type" value="{{ name }}">
+        <input type="hidden" name="back" value="{{ back }}">
+        <button type="submit" title="{{ help }}">{{ name }}</button>
+      </form>
+    {% endfor %}
+  </div>
+  {% if commands|selectattr(0, 'equalto', 'block')|list %}
+  <form method="post" action="/items/{{ item.id }}/act" class="row">
+    <input type="hidden" name="type" value="block">
+    <input type="hidden" name="back" value="{{ back }}">
+    <input name="waiting_on" placeholder="waiting on (login or name)" required>
+    <input name="reason" placeholder="reason (optional)" size="40">
+    <button type="submit">block</button>
+  </form>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Details</h2>
+  <form method="post" action="/items/{{ item.id }}/act" class="row">
+    <input type="hidden" name="type" value="update">
+    <input type="hidden" name="back" value="{{ back }}">
+    <label>priority
+      <select name="priority">
+        <option value="">—</option>
+        {% for p in range(4) %}<option value="{{ p }}" {{ 'selected' if item.priority == p }}>P{{ p }}</option>{% endfor %}
+      </select></label>
+    <label>due <input type="date" name="due_on" value="{{ item.due_on or '' }}"></label>
+    <label>area <input name="area" value="{{ item.area or '' }}" size="10"></label>
+    <label class="grow">next action <input name="next_action" value="{{ item.next_action or '' }}"></label>
+    <button type="submit">save</button>
+  </form>
+  <form method="post" action="/items/{{ item.id }}/act" class="row">
+    <input type="hidden" name="type" value="note">
+    <input type="hidden" name="back" value="{{ back }}">
+    <input class="grow" name="text" placeholder="add a note" required>
+    <button type="submit">note</button>
+  </form>
+</section>
+
+<section>
+  <h2>History</h2>
+  <table class="compact">
+    {% for e in events|reverse %}
+    <tr>
+      <td class="muted nowrap">{{ e.occurred_at.strftime('%Y-%m-%d %H:%M') }}</td>
+      <td>{{ e.actor }}</td>
+      <td><code>{{ e.event_type }}</code></td>
+      <td>{% if e.from_status != e.to_status %}{{ e.from_status or '' }} → <b>{{ e.to_status }}</b>{% endif %}</td>
+      <td class="muted">{% for k, v in e.payload.items() if k not in ('url',) and v not in (None, '') %}{{ k }}={{ v }} {% endfor %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

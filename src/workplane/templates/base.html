@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}workplane{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">workplane</a>
+  <nav>
+    <a href="/">Cockpit</a>
+    <a href="/items">All open</a>
+    <a href="/items?status=inbox">Inbox</a>
+    <a href="/items?status=committed">Committed</a>
+  </nav>
+  <form method="post" action="/sync" class="inline">
+    <button type="submit" title="Pull changes from GitHub">Sync</button>
+  </form>
+</header>
+<main>
+  {% if msg %}<p class="flash ok">{{ msg }}</p>{% endif %}
+  {% if error %}
+    <div class="flash err">
+      {{ error }}
+      {% set retry = request.query_params.get('retry') %}
+      {% if retry and 'committed' in error %}
+        {% set rid, rtype = retry.split(':') %}
+        <form method="post" action="/items/{{ rid }}/act" class="inline">
+          <input type="hidden" name="type" value="{{ rtype }}">
+          <input type="hidden" name="force" value="true">
+          <input type="hidden" name="back" value="{{ request.url.path }}">
+          <button type="submit">Commit anyway</button>
+        </form>
+      {% endif %}
+    </div>
+  {% endif %}
+  {% block content %}{% endblock %}
+</main>
+</body>
+</html>
+

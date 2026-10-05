@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block title %}items · workplane{% endblock %}
+{% block content %}
+<form method="get" action="/items" class="filters">
+  <select name="status">
+    <option value="">all open</option>
+    {% for opt in ['committed', 'inbox', 'backlog', 'ready', 'working', 'review', 'blocked', 'done', 'cancelled'] %}
+      <option value="{{ opt }}" {{ 'selected' if filters.status == opt }}>{{ opt }}</option>
+    {% endfor %}
+  </select>
+  <select name="area">
+    <option value="">any area</option>
+    {% for a in areas %}<option value="{{ a }}" {{ 'selected' if filters.area == a }}>{{ a }}</option>{% endfor %}
+  </select>
+  <input name="repo" placeholder="repo" value="{{ filters.repo }}" size="18">
+  <input name="q" placeholder="search titles" value="{{ filters.q }}" size="24">
+  <label><input type="checkbox" name="noise" value="true" {{ 'checked' if filters.noise }}> include bot/alerts</label>
+  <button type="submit">Filter</button>
+</form>
+
+<p class="muted">{{ rows|length }} item{{ '' if rows|length == 1 else 's' }}{% if rows|length >= 500 %} (first 500){% endif %}</p>
+<table>
+  <thead><tr><th>status</th><th>ref</th><th>title</th><th></th><th>updated</th></tr></thead>
+  {% for i in rows %}
+  <tr>
+    <td><span class="badge {{ i.status }}">{{ i.status }}</span></td>
+    <td>{{ m.ref(i) }}</td>
+    <td><a href="/items/{{ i.id }}">{{ i.title }}</a></td>
+    <td>{{ m.meta(i, today) }}</td>
+    <td class="muted nowrap">{{ (i.github_updated_at or i.updated_at).strftime('%Y-%m-%d') }}</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endblock %}

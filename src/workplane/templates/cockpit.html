@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% import "_macros.html" as m %}
+{% block content %}
+{% set s = summary %}
+<section class="stats">
+  <a class="stat {{ 'hot' if s.needs_me else '' }}" href="#needs"><b>{{ s.needs_me }}</b> need you</a>
+  <a class="stat" href="/items?status=inbox"><b>{{ s.by_status.inbox }}</b> in inbox</a>
+  <a class="stat {{ 'hot' if s.wip_limit and s.committed >= s.wip_limit else '' }}" href="/items?status=committed">
+    <b>{{ s.committed }}{% if s.wip_limit %}/{{ s.wip_limit }}{% endif %}</b> committed</a>
+  <span class="stat {{ 'warn' if s.stale_committed else '' }}"><b>{{ s.stale_committed }}</b> committed, untouched {{ s.stale_days }}d+</span>
+  <a class="stat" href="/items?status=backlog"><b>{{ s.by_status.backlog }}</b> backlog</a>
+  <a class="stat muted" href="/items?noise=true"><b>{{ s.open_noise }}</b> bot/alert items hidden</a>
+  <span class="stat muted">last sync {{ s.last_sync[:16].replace('T', ' ') ~ ' UTC' if s.last_sync else 'never' }}</span>
+</section>
+
+<form method="post" action="/capture" class="capture">
+  <input name="title" placeholder="Capture a task (email, letter, decision…)" required autofocus>
+  <input name="area" placeholder="area" list="areas" size="10">
+  <input name="due_on" type="date">
+  <label><input type="checkbox" name="commit" value="true"> commit</label>
+  <button type="submit">Add</button>
+  <datalist id="areas">{% for a in cfg.areas %}<option value="{{ a }}">{% endfor %}</datalist>
+</form>
+
+<section id="needs">
+  <h2>Needs you <span class="count">{{ needs|length }}</span></h2>
+  {% if needs %}
+  <table>
+    {% for i in needs %}
+    <tr>
+      <td class="why">{{ i.why }}</td>
+      <td>{{ m.ref(i) }}</td>
+      <td><a href="/items/{{ i.id }}">{{ i.title }}</a></td>
+      <td>{{ m.meta(i, today) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">Nothing is waiting on you.</p>{% endif %}
+</section>
+
+<section>
+  <h2>Committed</h2>
+  <div class="board">
+    {% for status, items in columns.items() %}
+    <div class="col">
+      <h3>{{ status.value }} <span class="count">{{ items|length }}</span></h3>
+      {% for i in items %}
+      <div class="card">
+        <div>{{ m.ref(i) }} <a href="/items/{{ i.id }}">{{ i.title }}</a></div>
+        <div class="metaline">{{ m.meta(i, today) }}</div>
+        {% if i.next_action %}<div class="next">→ {{ i.next_action }}</div>{% endif %}
+      </div>
+      {% else %}<p class="muted">—</p>{% endfor %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+
+<section>
+  <h2>Inbox <span class="count">{{ s.by_status.inbox }}</span>
+    <span class="hint">new issues and PRs from other people, and anything you captured</span></h2>
+  {% if inbox %}
+  <table>
+    {% for i in inbox %}
+    <tr>
+      <td>{{ m.ref(i) }}</td>
+      <td><a href="/items/{{ i.id }}">{{ i.title }}</a></td>
+      <td>{{ m.meta(i, today) }}</td>
+      <td class="actions">{{ m.quick(i, ['commit', 'triage'], '/') }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% if s.by_status.inbox > inbox|length %}<p><a href="/items?status=inbox">all {{ s.by_status.inbox }} →</a></p>{% endif %}
+  {% else %}<p class="muted">Inbox zero.</p>{% endif %}
+</section>
+
+<section>
+  <h2>Done or cancelled, last 7 days <span class="count">{{ done|length }}</span></h2>
+  {% if done %}
+  <table class="compact">
+    {% for i in done %}
+    <tr>
+      <td class="muted">{{ i.status_changed_at.strftime('%a %b %-d') }}</td>
+      <td><span class="badge {{ i.status }}">{{ i.status }}</span></td>
+      <td>{{ m.ref(i) }}</td>
+      <td><a href="/items/{{ i.id }}">{{ i.title }}</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<p class="muted">Nothing yet.</p>{% endif %}
+</section>
+{% endblock %}

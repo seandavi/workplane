@@ -1,0 +1,26 @@
+{% macro ref(i) -%}
+  {%- if i.repo -%}
+    <a class="ref" href="{{ i.url }}" target="_blank" rel="noopener">{{ i.repo.split('/')[1] }}#{{ i.number }}</a>{% if i.kind == 'pr' %}<span class="tag pr">PR</span>{% endif %}
+  {%- else -%}
+    <span class="ref manual">#{{ i.id }}</span>
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro meta(i, today) -%}
+  {%- if i.area %}<span class="tag area">{{ i.area }}</span>{% endif -%}
+  {%- if i.priority is not none %}<span class="tag p{{ i.priority }}">P{{ i.priority }}</span>{% endif -%}
+  {%- if i.due_on %}<span class="tag {{ 'overdue' if i.due_on < today else 'due' }}">due {{ i.due_on.strftime('%b %-d') }}</span>{% endif -%}
+  {%- if i.waiting_on %}<span class="tag waiting">waiting on {{ i.waiting_on }}</span>{% endif -%}
+  {%- if i.claimed_by %}<span class="tag claim">{{ i.claimed_by }}</span>{% endif -%}
+  {%- if i.author and i.source == 'github' %}<span class="muted">by {{ i.author }}</span>{% endif -%}
+{%- endmacro %}
+
+{% macro quick(i, cmds, back) -%}
+  {%- for c in cmds -%}
+    <form method="post" action="/items/{{ i.id }}/act" class="inline">
+      <input type="hidden" name="type" value="{{ c }}">
+      <input type="hidden" name="back" value="{{ back }}">
+      <button type="submit" class="small">{{ c }}</button>
+    </form>
+  {%- endfor -%}
+{%- endmacro %}
