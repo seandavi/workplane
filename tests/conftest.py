@@ -45,7 +45,8 @@ async def conn(database_url: str) -> AsyncIterator[psycopg.AsyncConnection]:
         database_url, autocommit=True, row_factory=dict_row
     ) as c:
         await c.execute(
-            "TRUNCATE work_events, work_items, github_items, repositories, sync_state RESTART IDENTITY"
+            "TRUNCATE run_events, runs, work_events, work_items, github_items, repositories, sync_state"
+            " RESTART IDENTITY"
         )
         yield c
 
