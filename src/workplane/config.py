@@ -13,6 +13,23 @@ from zoneinfo import ZoneInfo
 
 
 @dataclass(frozen=True, slots=True)
+class RunnerConfig:
+    """Where and how the host-side runner starts agents. Paths may use ``~``."""
+
+    #: Directories holding existing clones, searched by repo name.
+    repo_roots: tuple[str, ...] = ("~/Documents/git",)
+    #: Worktrees go in <worktree_root>/<repo>/wp-<number>; clones missing locally go in _clones/.
+    worktree_root: str = "~/Documents/git/worktrees/workplane"
+    #: Run logs and omp session files.
+    state_dir: str = "~/.local/state/workplane"
+    max_concurrent: int = 2
+    model: str | None = None
+    thinking: str | None = None
+    max_time: str = "45m"
+    approval_mode: str = "yolo"
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     database_url: str
     github_token: str | None = None
@@ -34,6 +51,7 @@ class Config:
     areas: dict[str, tuple[str, ...]] = field(default_factory=dict)
     #: IANA zone that decides what "today" is for due dates.
     timezone: str = "UTC"
+    runner: RunnerConfig = field(default_factory=RunnerConfig)
 
     def area_for(self, full_name: str) -> str | None:
         name = full_name.lower()
@@ -82,6 +100,21 @@ def load(path: Path | None = None, **overrides: object) -> Config:
         "noise_authors": frozenset(noise.get("authors", ())),
         "areas": {k: tuple(v) for k, v in data.get("areas", {}).items()},
         "timezone": str(data.get("timezone", "UTC")),
+        "runner": _runner(data.get("runner", {})),
     }
     values.update(overrides)
     return Config(**values)  # type: ignore[arg-type]
+
+
+def _runner(data: dict) -> RunnerConfig:
+    defaults = RunnerConfig()
+    return RunnerConfig(
+        repo_roots=tuple(data.get("repo_roots", defaults.repo_roots)),
+        worktree_root=str(data.get("worktree_root", defaults.worktree_root)),
+        state_dir=str(data.get("state_dir", defaults.state_dir)),
+        max_concurrent=int(data.get("max_concurrent", defaults.max_concurrent)),
+        model=data.get("model") or None,
+        thinking=data.get("thinking") or None,
+        max_time=str(data.get("max_time", defaults.max_time)),
+        approval_mode=str(data.get("approval_mode", defaults.approval_mode)),
+    )
