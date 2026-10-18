@@ -1,5 +1,7 @@
 # workplane
 
+> **Retired (2026-10-18):** its GitHub sync and inbox are covered by [seandavi/lookout](https://github.com/seandavi/lookout); the decision queue is lookout#12. See ADR 0002 in lookout. This repository is archived.
+
 [![ci](https://github.com/seandavi/workplane/actions/workflows/ci.yml/badge.svg)](https://github.com/seandavi/workplane/actions/workflows/ci.yml)
 
 One work queue over GitHub issues, PRs and manual tasks. GitHub stays the system of record; workplane adds what GitHub doesn't have: an inbox for other people's new items, a hard limit on what you've committed to, "waiting on whom", due dates for non-code obligations, and an append-only event log behind every status.
